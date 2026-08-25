@@ -135,6 +135,11 @@ with st.sidebar:
         help="按公司属性套用对应估值参数。自动：高增长→成长股、高营收波动→周期股、"
              "低增长高股息→价值股、其余→稳健股；也可手动指定。",
     )
+    # 估值风格切换 → 清掉缓存的 DCF 假设，使其按新风格重建
+    if st.session_state.get("_style_used") != style:
+        st.session_state["_style_used"] = style
+        if "dcf_assump" in st.session_state:
+            st.session_state.pop("dcf_assump", None)
 
 # ============ 主区域 ============
 if not run_btn and "cd" not in st.session_state:
@@ -575,6 +580,18 @@ if "cd" in st.session_state:
                         st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**。{rec_txt}")
                 else:
                     st.markdown(f"**解读**：{rec_txt}")
+
+                # 方法一致性提示：DCF 与 DDM 分歧过大时提醒（银行/保险等资本消耗型行业 FCFF 法常偏高）
+                _dcf_v = next((r_[1] for r_ in rows if str(r_[0]).startswith("DCF")
+                               and isinstance(r_[1], (int, float)) and math.isfinite(r_[1])), np.nan)
+                _ddm_v = next((r_[1] for r_ in rows if str(r_[0]).startswith("DDM")
+                               and isinstance(r_[1], (int, float)) and math.isfinite(r_[1])), np.nan)
+                if math.isfinite(_dcf_v) and math.isfinite(_ddm_v) and _ddm_v > 0:
+                    gap = _dcf_v / _ddm_v
+                    if gap > 1.6:
+                        st.warning(f"⚠️ **方法分歧较大**：DCF 估值约 {_dcf_v:.0f}，约为 DDM（{_ddm_v:.0f}）的 "
+                                   f"{gap:.1f} 倍。若为银行/保险等资本消耗型行业，FCFF 类 DCF 通常系统性偏高，"
+                                   "建议以 **DDM 或可比法**为主要参考。")
 
         st.markdown("### AI 综合研判")
         st.markdown("默认使用本地规则引擎汇总。接入大模型 API 后可获得更深入的定性分析。")

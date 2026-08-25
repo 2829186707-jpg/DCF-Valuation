@@ -23,6 +23,13 @@ def calc_wacc(
     rf_ = cd.rf if rf is None else rf
     erp_ = cd.erp if erp is None else erp
     beta_ = cd.beta if beta is None else beta
+    # Beta 获取失败（回归样本不足/行情缺失）时用市场默认 1.0，避免 WACC 变 NaN
+    if beta_ is None or not np.isfinite(beta_):
+        beta_ = 1.0
+    if rf_ is None or not np.isfinite(rf_):
+        rf_ = 0.020 if cd.market == "US" else 0.021
+    if erp_ is None or not np.isfinite(erp_):
+        erp_ = 0.042 if cd.market == "US" else 0.050
 
     # 税率：用最新年 tax/(税前利润)，缺失时按市场默认
     tax_rate = np.nan

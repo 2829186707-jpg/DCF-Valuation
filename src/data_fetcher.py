@@ -293,20 +293,25 @@ def _fetch_a_annual_sina(symbol: str) -> pd.DataFrame | None:
     annual["revenue"] = pick(inc, "营业总收入", "营业收入")
     annual["operating_income"] = pick(inc, "营业利润")
     annual["net_income"] = pick(inc, "归属于母公司所有者的净利润", "净利润")
-    annual["tax"] = pick(inc, "所得税费用")
-    annual["total_equity"] = pick(bal, "归属于母公司股东权益合计")
+    annual["tax"] = pick(inc, "所得税费用", "减:所得税", "所得税")
+    # 权益字段存在行业差异：制造/消费=“归属于母公司股东权益合计”，银行=“归属于母公司股东的权益”
+    annual["total_equity"] = pick(bal, "归属于母公司股东权益合计",
+                                  "归属于母公司股东的权益", "归属于母公司股东权益")
 
     # 累计折旧原始值（年报间 diff 得到全年折旧）
-    dep_col = pick(bal, "累计折旧")
+    dep_col = pick(bal, "累计折旧", "固定资产折旧")
     annual["_accum_dep"] = dep_col if dep_col is not None else np.nan
 
+    # 资本开支字段存在“…支付的现金 / …所支付的现金”两种表述（银行等金融行业为后者）
     annual["capex"] = pick(
-        cas, "购建固定资产、无形资产和其他长期资产所支付的现金"
+        cas, "购建固定资产、无形资产和其他长期资产所支付的现金",
+        "购建固定资产、无形资产和其他长期资产支付的现金",
     )
     annual["cfo"] = pick(cas, "经营活动产生的现金流量净额")
 
-    # 分红：分配股利、利润或偿付利息所支付的现金
-    div_col = pick(cas, "分配股利、利润或偿付利息所支付的现金")
+    # 分红：分配股利、利润或偿付利息所支付的现金（部分行业表述无“所”字）
+    div_col = pick(cas, "分配股利、利润或偿付利息所支付的现金",
+                   "分配股利、利润或偿付利息支付的现金")
     annual["dividends"] = div_col
 
     def series_or_zero(df: pd.DataFrame, *keys) -> pd.Series:
@@ -321,10 +326,12 @@ def _fetch_a_annual_sina(symbol: str) -> pd.DataFrame | None:
     bond = series_or_zero(bal, "应付债券")
     annual["total_debt"] = st + lt + bond
 
-    annual["cash"] = pick(bal, "货币资金")
+    # 现金：制造/消费=“货币资金”，银行=“现金及存放中央银行款项”
+    annual["cash"] = pick(bal, "货币资金", "现金及存放中央银行款项",
+                          "现金及现金等价物")
 
     # 总股本：实收资本(或股本) / 面值1元
-    paid = pick(bal, "实收资本(或股本)")
+    paid = pick(bal, "实收资本(或股本)", "股本")
     annual["shares"] = paid
 
     # 营运资本原始值（年报间 diff 得全年变动）
