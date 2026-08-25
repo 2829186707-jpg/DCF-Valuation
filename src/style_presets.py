@@ -95,17 +95,21 @@ def style_terminal_g(style: str, market: str) -> float:
 
 
 def _hist_cagr(cd: CompanyData, years: int = 5) -> float:
-    """近 N 年收入 CAGR。"""
+    """近 N 年收入 CAGR（稳健版：首尾须为正，否则返回 NaN）。"""
     ann = cd.annual
     if ann is None or len(ann) == 0:
         return np.nan
     rev = ann["revenue"].dropna()
+    rev = rev[rev > 0]
     if len(rev) < 2:
         return np.nan
     r = rev.tail(years)
     if len(r) < 2:
         r = rev
-    return float((r.iloc[-1] / r.iloc[0]) ** (1 / (len(r) - 1)) - 1)
+    first, last = r.iloc[0], r.iloc[-1]
+    if np.isfinite(first) and np.isfinite(last) and first > 0 and last > 0:
+        return float((last / first) ** (1 / (len(r) - 1)) - 1)
+    return np.nan
 
 
 def auto_detect_style(cd: CompanyData) -> str:

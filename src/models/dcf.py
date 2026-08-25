@@ -55,6 +55,18 @@ class DCFResult:
 
 # ---------------- 自动生成基准假设 ----------------
 
+def _safe_cagr(series: pd.Series) -> float:
+    """稳健 CAGR：仅当首尾均为正有限数时计算；否则返回 NaN。
+
+    避免 0/负值/异常数据导致 inf 或复数（float(complex) 会抛 TypeError）。
+    """
+    first, last = series.iloc[0], series.iloc[-1]
+    n = len(series)
+    if (np.isfinite(first) and np.isfinite(last) and first > 0 and last > 0 and n >= 2):
+        return float((last / first) ** (1 / (n - 1)) - 1)
+    return float("nan")
+
+
 def _trend_growth(ann: pd.DataFrame, years: int = 5) -> float:
     """趋势修正的收入增长率基础（供 DCF / DDM 共用）。
 
@@ -62,19 +74,21 @@ def _trend_growth(ann: pd.DataFrame, years: int = 5) -> float:
     显著加速 → 适度上修（不追高）。返回修正后的基准增速。
     """
     rev = ann["revenue"].dropna()
+    rev = rev[rev > 0]  # 剔除 0/负值异常后计算
     if len(rev) < 2:
         return 0.05
     r5 = rev.tail(years)
-    if len(r5) >= 2:
-        hist_g = (r5.iloc[-1] / r5.iloc[0]) ** (1 / (len(r5) - 1)) - 1
-    else:
-        hist_g = np.nan
+    if len(r5) < 2:
+        r5 = rev
+    hist_g = _safe_cagr(r5)
     if not np.isfinite(hist_g):
-        hist_g = rev.pct_change().tail(3).mean()
+        # 首尾异常时用平均同比增速兜底
+        pc = rev.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+        hist_g = float(pc.tail(3).mean()) if len(pc) else 0.05
     if not np.isfinite(hist_g):
         hist_g = 0.05
     last_g = np.nan
-    if rev.iloc[-2] > 0:
+    if len(rev) >= 2 and rev.iloc[-2] > 0:
         last_g = rev.iloc[-1] / rev.iloc[-2] - 1
     if np.isfinite(last_g) and last_g > -0.30:
         if last_g < hist_g * 0.5:

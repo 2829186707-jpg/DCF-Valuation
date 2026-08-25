@@ -155,12 +155,15 @@ def run_reverse_dcf(
                 lo, flo = mid, fm
         res.implied_growth = (lo + hi) / 2
         res.current_growth = g0_fixed
-        # 对比公司当前隐含（用近5年历史增长）
+        # 对比公司当前隐含（用近5年历史增长，稳健CAGR）
         hist_g = np.nan
         rev = cd.annual["revenue"].dropna()
+        rev = rev[rev > 0]
         if len(rev) >= 2:
             r5 = rev.tail(5)
-            if len(r5) >= 2:
+            if len(r5) < 2:
+                r5 = rev
+            if r5.iloc[0] > 0 and r5.iloc[-1] > 0 and np.isfinite(r5.iloc[0]) and np.isfinite(r5.iloc[-1]):
                 hist_g = (r5.iloc[-1] / r5.iloc[0]) ** (1 / (len(r5) - 1)) - 1
         res.current_growth = float(hist_g) if np.isfinite(hist_g) else np.nan
         res.detail = _judge(res.implied_growth, res.current_growth, "显式期首年收入增长率")

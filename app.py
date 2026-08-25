@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 DCF 智能估值面板 —— Streamlit 主应用
 
@@ -230,7 +230,17 @@ if "cd" in st.session_state:
         st.caption("自动生成基准假设，可在下方调整。所有假设改变都会实时重算。")
 
         if "dcf_assump" not in st.session_state:
-            st.session_state["dcf_assump"] = auto_assumptions(cd, wacc_info, style=style)
+            try:
+                st.session_state["dcf_assump"] = auto_assumptions(cd, wacc_info, style=style)
+            except Exception as e:
+                # 兜底：自动风格重试；仍失败则用最小保守假设，避免整个应用崩溃
+                try:
+                    st.session_state["dcf_assump"] = auto_assumptions(cd, wacc_info, style="auto")
+                    st.warning(f"按「{style}」口径生成假设失败（{type(e).__name__}），已自动回退到「自动识别」口径。"
+                               f"如需排查可反馈以下信息：{e}")
+                except Exception as e2:
+                    st.error(f"估值假设生成失败：{type(e2).__name__}: {e2}。请更换股票或风格后重试。")
+                    st.stop()
         a = st.session_state["dcf_assump"]
 
         with st.expander("⚙️ 预测假设（可调整）", expanded=True):
@@ -366,12 +376,18 @@ if "cd" in st.session_state:
         with st.expander("⚙️ 假设", expanded=True):
             from src.style_presets import style_terminal_g as _stg
             _ddm_g2_def = _stg(style, cd.market)
+            from src.wacc import calc_wacc as _ddm_cw
+            _ddm_re = _ddm_cw(cd)["re"]
             col1, col2, col3 = st.columns(3)
             g1 = st.number_input("阶段一股利增速", 0.0, 0.50,
                                  float(results.get("ddm_g1", 0.04)), step=0.005, format="%.3f", key="ddm_g1_in")
             g2 = st.number_input("永续股利增速", 0.0, 0.06, _ddm_g2_def, step=0.005, format="%.3f", key="ddm_g2_in")
             yrs = st.slider("阶段一年数", 3, 10, 5, key="ddm_yrs")
-        ddm_res = run_ddm(cd, growth_phase1=g1, growth_phase2=g2, years_phase1=yrs, style=style)
+            ddm_re = st.number_input("股权成本 Re（默认按 CAPM）", 0.0, 0.25, _ddm_re,
+                                     step=0.005, format="%.3f", key="ddm_re_in",
+                                     help="贴现率，越高内在价值越低。默认取 CAPM 计算结果，可手动调整。")
+        ddm_res = run_ddm(cd, growth_phase1=g1, growth_phase2=g2, years_phase1=yrs,
+                          cost_of_equity=ddm_re, style=style)
         st.session_state["results"] = {**results, "ddm": ddm_res}
         if ddm_res.error:
             st.warning(ddm_res.error)
@@ -401,11 +417,26 @@ if "cd" in st.session_state:
             _rev_gterm_def = _stg2(style, cd.market)
             c1, c2 = st.columns(2)
             rev_margin = c1.number_input("营业利润率", 0.0, 0.90,
-                                         float(results.get("rev_margin", 0.20)), step=0.01, format="%.3f")
+                                         float(results.get("rev_margin", a.operating_margin)), step=0.01, format="%.3f",
+                                         key="rev_margin_in")
             rev_gterm = c2.number_input("永续增长率(反推增长率时用)", 0.0, 0.06,
-                                        float(results.get("rev_gterm", _rev_gterm_def)), step=0.005, format="%.3f")
-        rev_res = run_reverse_dcf(cd, mode=rev_mode, margin=rev_margin,
-                                  g_terminal_fixed=rev_gterm, style=style)
+                                        float(results.get("rev_gterm", _rev_gterm_def)), step=0.005, format="%.3f",
+                                        key="rev_gterm_in")
+            c3, c4 = st.columns(2)
+            _rev_wacc_def = dcf_res.wacc if math.isfinite(dcf_res.wacc) else 0.10
+            rev_wacc = c3.number_input("WACC（固定折现率）", 0.0, 0.25, float(_rev_wacc_def),
+                                       step=0.005, format="%.3f", key="rev_wacc_in",
+                                       help="默认取 DCF 页计算值；WACC 越高，反推的隐含增长率越高。")
+            rev_capex = c4.number_input("资本开支/收入", 0.0, 0.60, float(a.capex_pct), step=0.005, format="%.3f",
+                                        key="rev_capex_in")
+            c5, c6 = st.columns(2)
+            rev_da = c5.number_input("折旧摊销/收入", 0.0, 0.60, float(a.da_pct), step=0.005, format="%.3f",
+                                     key="rev_da_in")
+            rev_nwc = c6.number_input("营运资本变动/收入(可负)", -0.10, 0.30, float(a.nwc_pct), step=0.005, format="%.3f",
+                                      key="rev_nwc_in")
+        rev_res = run_reverse_dcf(cd, mode=rev_mode, margin=rev_margin, g_terminal_fixed=rev_gterm,
+                                  wacc=rev_wacc, capex_pct=rev_capex, da_pct=rev_da, nwc_pct=rev_nwc,
+                                  style=style)
         st.session_state["results"] = {**results, "reverse_dcf": rev_res}
         if rev_res.error:
             st.warning(rev_res.error)
@@ -495,10 +526,55 @@ if "cd" in st.session_state:
             fig_cmp.add_bar(x=comp["方法"], y=comp["每股价值"], name="各方法内在价值",
                             marker_color=["steelblue", "seagreen", "orange", "purple"][:len(comp)])
             price_now = cd.latest_price()
+
+            # 推荐合理估值 = 各方法中位数（稳健，不受极端值干扰）
+            _vals = [float(v) for v in comp["每股价值"].tolist() if isinstance(v, (int, float)) and math.isfinite(v)]
+            if _vals:
+                median_v = float(np.median(_vals))
+                lo_v, hi_v = min(_vals), max(_vals)
+            else:
+                median_v = lo_v = hi_v = np.nan
+
             fig_cmp.add_hline(y=price_now, line_dash="dash", line_color="red",
                               annotation_text=f"当前价 {price_now:.2f}")
+            if math.isfinite(median_v):
+                fig_cmp.add_hline(y=median_v, line_dash="dot", line_color="seagreen",
+                                  annotation_text=f"推荐 {median_v:.2f}")
             fig_cmp.update_layout(height=360, margin=dict(l=10, r=10, t=30, b=10))
             st.plotly_chart(fig_cmp, width="stretch")
+
+            # ========== 推荐合理估值区块 ==========
+            if math.isfinite(median_v):
+                st.markdown("### 🎯 推荐合理估值")
+                up = median_v / price_now - 1 if price_now and price_now > 0 else np.nan
+                if up >= 0.2:
+                    rec_concl, rec_txt = "低估", "推荐合理估值高于当前价，安全边际较充足，具备配置价值。"
+                elif up >= 0:
+                    rec_concl, rec_txt = "合理偏低", "推荐合理估值略高于当前价，处于合理区间下沿。"
+                elif up >= -0.2:
+                    rec_concl, rec_txt = "合理偏高", "推荐合理估值略低于当前价，处于合理区间上沿。"
+                else:
+                    rec_concl, rec_txt = "高估", "推荐合理估值低于当前价，当前价格透支较多预期，需谨慎。"
+
+                rc1, rc2, rc3 = st.columns(3)
+                rc1.metric("推荐合理估值（中位数）", f"{median_v:.2f} {cd.currency}",
+                           f"{up:+.1%} vs 现价")
+                rc2.metric("合理区间", f"{lo_v:.2f} ~ {hi_v:.2f} {cd.currency}")
+                rc3.metric("综合结论", rec_concl)
+
+                shares = cd.shares
+                if not math.isfinite(shares) or shares <= 0:
+                    shares = cd.last_value("shares")
+                if math.isfinite(shares) and shares > 0:
+                    rec_mcap, lo_mcap, hi_mcap = median_v * shares, lo_v * shares, hi_v * shares
+                    cur_mcap = cd.market_cap
+                    if math.isfinite(cur_mcap) and cur_mcap > 0:
+                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**（区间 {fmt_big(lo_mcap)} ~ "
+                                    f"{fmt_big(hi_mcap)}），当前市值 {fmt_big(cur_mcap)}。{rec_txt}")
+                    else:
+                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**。{rec_txt}")
+                else:
+                    st.markdown(f"**解读**：{rec_txt}")
 
         st.markdown("### AI 综合研判")
         st.markdown("默认使用本地规则引擎汇总。接入大模型 API 后可获得更深入的定性分析。")
