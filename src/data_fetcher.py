@@ -543,16 +543,92 @@ def _fetch_us_annual(tk) -> pd.DataFrame | None:
     return annual.reindex(sorted(annual.index))
 
 
+# ---------------- 名称 → 代码解析 ----------------
+
+def _resolve_a_name(name: str) -> str | None:
+    """A股名称/简称 → 6位代码。精确匹配优先，其次唯一包含匹配。"""
+    import akshare as ak
+    try:
+        df = ak.stock_info_a_code_name()
+    except Exception:
+        return None
+    df["name"] = df["name"].astype(str).str.strip()
+    name = name.strip()
+    hit = df[df["name"] == name]
+    if len(hit) == 1:
+        return str(hit.iloc[0]["code"])
+    hit = df[df["name"].str.contains(name, na=False, regex=False)]
+    if len(hit) == 1:
+        return str(hit.iloc[0]["code"])
+    return None
+
+
+def _resolve_us_name(name: str) -> str | None:
+    """美股英文名称 → ticker（用 SEC 官方公司名单）。
+    匹配顺序：精确 ticker > title 以名称开头(唯一) > title 最短。
+    """
+    try:
+        from .sec_fetcher import _get_json
+        data = _get_json("https://www.sec.gov/files/company_tickers.json",
+                         "company_tickers.json")
+    except Exception:
+        return None
+    rows = list(data.values())
+    name_u = name.strip().upper()
+    for r in rows:
+        if str(r.get("ticker", "")).upper() == name_u:
+            return r["ticker"]
+    name_l = name.strip().lower()
+    hits = [r for r in rows if name_l in str(r.get("title", "")).lower()]
+    if not hits:
+        return None
+    # 优先：title 以名称开头（如 "Apple Inc." vs "Apple iSports Group"）
+    starts = [r for r in hits if str(r.get("title", "")).lower().startswith(name_l)]
+    if len(starts) == 1:
+        return starts[0]["ticker"]
+    pool = starts if len(starts) > 1 else hits
+    # 取 title 最短者（主公司通常名称更短）
+    pool = sorted(pool, key=lambda r: len(str(r.get("title", ""))))
+    return pool[0]["ticker"]
+
+
 # ---------------- 对外入口 ----------------
 
 
 def fetch_company(symbol: str, market: str | None = None) -> CompanyData:
-    """主入口：输入代码(可含市场后缀)，返回标准化 CompanyData。"""
-    symbol = symbol.strip().upper()
-    if market is None:
-        market = detect_market(symbol)
-    if market == "US":
-        return _fetch_us_stock(re.sub(r"\.US$", "", symbol))
-    if market == "A":
+    """主入口：输入代码或名称，返回标准化 CompanyData。
+
+    支持：A股6位数字 / 美股字母代码 / A股中文名称 / 美股英文名称。
+    market 参数可手动指定市场；为 None 时自动判断。
+    """
+    symbol = symbol.strip()
+    if not symbol:
+        raise ValueError("请输入股票代码或名称")
+
+    # 带市场前缀的 A股代码，如 sh600519 / sz000001
+    lower = symbol.lower()
+    if re.match(r"^(sh|sz|bj)\d{6}$", lower):
+        return _fetch_a_share(re.sub(r"^(sh|sz|bj)", "", lower))
+
+    m = detect_market(symbol)
+    if m == "A":
         return _fetch_a_share(_norm_a_symbol(symbol).lstrip("shszbj"))
-    raise ValueError(f"无法识别市场: {symbol}")
+    if m == "US":
+        cd = _fetch_us_stock(re.sub(r"\.US$", "", symbol).upper())
+        # 若代码无效（无财务且无行情），可能是英文公司名称（如 Apple）→ 名称匹配
+        if (cd.annual is None or len(cd.annual) == 0) and not np.isfinite(cd.price):
+            code = _resolve_us_name(symbol)
+            if code and code.upper() != symbol.upper():
+                return _fetch_us_stock(code)
+        return cd
+
+    # 非代码 → 名称解析
+    if re.search(r"[\u4e00-\u9fff]", symbol):
+        code = _resolve_a_name(symbol)
+        if code:
+            return _fetch_a_share(code)
+        raise ValueError(f"未找到匹配的A股名称: {symbol}")
+    code = _resolve_us_name(symbol)
+    if code:
+        return _fetch_us_stock(code)
+    raise ValueError(f"无法识别股票（既不是代码也不是已知名称）: {symbol}")

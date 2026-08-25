@@ -110,7 +110,7 @@ with st.sidebar:
 
     symbol_input = st.text_input("股票代码 / 名称", value="600519", key="symbol_input")
 
-    auto_market = detect_market(symbol_input) or "A"
+    auto_market = detect_market(symbol_input)
     market = st.radio("市场（一般自动识别，可手动修正）", ["自动", "A股", "美股"],
                       index=0, horizontal=True)
     if market == "A股":
@@ -123,13 +123,13 @@ with st.sidebar:
     run_btn = st.button("🚀 开始估值", type="primary", use_container_width=True)
 
     st.divider()
-    st.caption("💡 提示：输入 6 位数字=A股（如 600519），字母代码=美股（如 AAPL）。")
+    st.caption("💡 输入：A股 6位数字或中文名称（如 600519 / 贵州茅台），美股代码或英文名称（如 AAPL / Apple）。")
 
 # ============ 主区域 ============
 if not run_btn and "cd" not in st.session_state:
     st.markdown("## 👋 欢迎使用 DCF 智能估值面板")
     st.markdown(
-        "在左侧输入 **A股**（6位代码，如 `600519` 贵州茅台）或 **美股**（字母代码，如 `AAPL` 苹果）"
+        "在左侧输入 **A股**（6位代码或中文名称，如 `600519` / `贵州茅台`）或 **美股**（代码或英文名称，如 `AAPL` / `Apple`）"
         "，点击 **开始估值**。\n\n"
         "系统会自动：\n"
         "- 抓取近 5-10 年财务报表、当前行情、Beta、无风险利率\n"
@@ -150,7 +150,7 @@ if run_btn:
         try:
             cd = _fetch_cached(symbol, mkt)
             if cd.annual is None or len(cd.annual) == 0:
-                st.error(f"未能获取 {symbol} 的财务数据，请检查代码是否正确（A股6位数字/美股字母代码）。")
+                st.error(f"未能获取 {symbol} 的财务数据，请检查代码/名称是否正确（A股6位数字或名称/美股字母代码或英文名称）。")
                 st.stop()
             st.session_state["cd"] = cd
             st.session_state["symbol"] = symbol
