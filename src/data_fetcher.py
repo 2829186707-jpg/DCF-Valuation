@@ -67,8 +67,8 @@ def get_rf(market: str) -> float:
 
 
 def get_erp(market: str) -> float:
-    """股权风险溢价 ERP（默认：A股6.0%，美股4.5%）"""
-    return 0.060 if market == "A" else 0.045
+    """股权风险溢价 ERP（基准：A股5.0%，美股4.2%，与 style_presets.BASE_ERP 一致）"""
+    return 0.050 if market == "A" else 0.042
 
 
 # ---------------- 统一数据结构 ----------------

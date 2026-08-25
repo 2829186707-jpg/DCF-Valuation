@@ -21,6 +21,7 @@ class DCFAssumptions:
     forecast_years: int = 5
     revenue_growth: float = 0.05          # 显式期首年收入增长率
     growth_decline: float = 0.0           # 每年增长率衰减(百分点)，0=恒定
+    accel: float = 0.0                    # 每年增长率加速(百分点)，>0 支持成长股加速
     terminal_growth: float = 0.025        # 永续增长率
     operating_margin: float = 0.20        # 目标营业利润率
     tax_rate: float = 0.25
@@ -31,6 +32,7 @@ class DCFAssumptions:
     debt_rate: float = 0.040
     erp: float | None = None
     rf: float | None = None
+    base_rev: float | None = None         # 周期股正常化收入基准（None=用最新年）
 
 
 @dataclass
@@ -47,55 +49,95 @@ class DCFResult:
     assumptions: dict = field(default_factory=dict)
     conclusion: str = ""
     detail: str = ""
+    note: str = ""
     error: str = ""
 
 
 # ---------------- 自动生成基准假设 ----------------
 
-def auto_assumptions(cd: CompanyData, wacc_info: dict) -> DCFAssumptions:
+def _trend_growth(ann: pd.DataFrame, years: int = 5) -> float:
+    """趋势修正的收入增长率基础（供 DCF / DDM 共用）。
+
+    近5年 CAGR 可能掩盖近期增速拐点：最近一年增速显著放缓 → 向最近一年下修；
+    显著加速 → 适度上修（不追高）。返回修正后的基准增速。
+    """
+    rev = ann["revenue"].dropna()
+    if len(rev) < 2:
+        return 0.05
+    r5 = rev.tail(years)
+    if len(r5) >= 2:
+        hist_g = (r5.iloc[-1] / r5.iloc[0]) ** (1 / (len(r5) - 1)) - 1
+    else:
+        hist_g = np.nan
+    if not np.isfinite(hist_g):
+        hist_g = rev.pct_change().tail(3).mean()
+    if not np.isfinite(hist_g):
+        hist_g = 0.05
+    last_g = np.nan
+    if rev.iloc[-2] > 0:
+        last_g = rev.iloc[-1] / rev.iloc[-2] - 1
+    if np.isfinite(last_g) and last_g > -0.30:
+        if last_g < hist_g * 0.5:
+            return float(hist_g * 0.5 + last_g * 0.5)   # 下滑趋势，向最近一年靠拢
+        if last_g > hist_g * 1.5:
+            return float(hist_g * 0.6 + last_g * 0.4)   # 加速但不追高
+    return float(hist_g)
+
+
+def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> DCFAssumptions:
+    """按估值风格生成基准假设。style: auto/growth/steady/value/cyclical。"""
+    from ..style_presets import resolve_style, style_erp, style_terminal_g, normalize_revenue
+
     a = DCFAssumptions()
+    style, ps = resolve_style(style, cd)
     ann = cd.annual
+    mw = ps["margin_window"]  # 利润率统计窗口
 
     if ann is not None and len(ann) >= 2:
         rev = ann["revenue"].dropna()
-        # 历史增长率（近5年 CAGR，更贴近当前增长阶段）
         if len(rev) >= 2:
-            r5 = rev.tail(5)
-            if len(r5) >= 2:
-                hist_g = (r5.iloc[-1] / r5.iloc[0]) ** (1 / (len(r5) - 1)) - 1
+            base_g = _trend_growth(ann, 5)
+            # 按风格折扣后作为预测起点
+            a.revenue_growth = float(max(base_g * ps["growth_discount"], 0.005))
+            # 显式期路径：加速 / 持平 / 衰减
+            a.accel = float(ps["accel"])
+            if ps["decline_divisor"]:
+                a.growth_decline = float(max((a.revenue_growth - 0.03) / ps["decline_divisor"], 0.0))
             else:
-                hist_g = np.nan
-            if not np.isfinite(hist_g):
-                hist_g = rev.pct_change().tail(3).mean()
-            if np.isnan(hist_g) or not np.isfinite(hist_g):
-                hist_g = 0.05
-            # 增长率打 6-8 折作为预测起点
-            a.revenue_growth = float(max(hist_g * 0.7, 0.005))
-            a.growth_decline = float(max((hist_g - 0.03) / 5, 0.0))
+                a.growth_decline = 0.0
 
-        # 营业利润率：最近3年均值，并做合理区间约束
+        # 营业利润率：按风格窗口取历史中位数，并做合理区间约束
         margin = (ann["operating_income"] / ann["revenue"]).dropna()
         if len(margin):
-            m = float(margin.tail(3).median())
+            m = float(margin.tail(mw).median())
             a.operating_margin = float(np.clip(m, 0.005, 0.85))
 
-        # capex/da/nwc 比例：历史均值
+        # capex/da/nwc 比例：历史均值（周期股用较长窗口）
         rev_mean = ann["revenue"].replace(0, np.nan).mean()
         if np.isfinite(rev_mean) and rev_mean > 0:
             cp = (ann["capex"] / ann["revenue"]).dropna()
             if len(cp):
-                a.capex_pct = float(np.clip(cp.tail(3).median(), 0.0, 0.6))
+                a.capex_pct = float(np.clip(cp.tail(mw).median(), 0.0, 0.6))
             dp = (ann["da"] / ann["revenue"]).dropna()
             if len(dp):
-                a.da_pct = float(np.clip(dp.tail(3).median(), 0.0, 0.6))
+                a.da_pct = float(np.clip(dp.tail(mw).median(), 0.0, 0.6))
             nw = (ann["change_wc"] / ann["revenue"]).dropna()
             if len(nw):
-                # 营运资本变动占收入（带符号：正=占用增加流出，负=释放现金）
-                a.nwc_pct = float(np.clip(nw.tail(3).median(), -0.10, 0.20))
+                a.nwc_pct = float(np.clip(nw.tail(mw).median(), -0.10, 0.20))
 
+        # 周期股：正常化收入基准（周期均值）
+        if ps["normalize"]:
+            base = normalize_revenue(cd, window=8)
+            if base is not None and base > 0:
+                a.base_rev = float(base)
+
+    a.terminal_growth = style_terminal_g(style, cd.market)
+    # 逻辑一致性：显式期增长率不应低于永续增长率
+    # （否则出现"显式期低增长 → 永续高增长"的矛盾设定）
+    a.revenue_growth = max(a.revenue_growth, a.terminal_growth)
     a.tax_rate = float(wacc_info["tax_rate"])
     a.beta = float(wacc_info["beta"])
-    a.erp = wacc_info["erp"]
+    a.erp = style_erp(style, cd.market)
     a.rf = wacc_info["rf"]
     return a
 
@@ -118,15 +160,15 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
     wacc = wacc_info["wacc"]
     res.wacc = wacc
 
-    # 基准年（用最新年）
-    last_rev = cd.last_value("revenue")
+    # 基准年（周期股用正常化收入，否则最新年）
+    last_rev = a.base_rev if (a.base_rev is not None and np.isfinite(a.base_rev) and a.base_rev > 0) else cd.last_value("revenue")
     if not np.isfinite(last_rev) or last_rev <= 0:
         res.error = "营业收入数据缺失"
         return res
 
-    # 增长率序列
+    # 增长率序列（支持加速/持平/衰减）
     n = a.forecast_years
-    growths = [a.revenue_growth - a.growth_decline * i for i in range(n)]
+    growths = [a.revenue_growth - a.growth_decline * i + a.accel * i for i in range(n)]
     growths = [max(g, a.terminal_growth - 0.01) for g in growths]
 
     rows = []
@@ -162,6 +204,11 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
     tv = fcff_last * (1 + a.terminal_growth) / (wacc - a.terminal_growth)
     tv_pv = tv / (1 + wacc) ** n
 
+    # 低折现率差距提示：永续增长率接近 WACC 时终值对估值影响极大
+    if wacc - a.terminal_growth < 0.02:
+        res.note = ("当前折现率与永续增长率差距较小，终值占比很高，估值对这两个假设极其敏感。"
+                    "低利率环境下 DCF 可能系统性高估，建议结合可比公司/DDM 交叉验证。")
+
     # EV
     ev = 0.0
     for i, row in enumerate(rows):
@@ -188,6 +235,12 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
         res.error = "总股本缺失，无法计算每股价值"
         return res
     per_share = equity_value / shares
+
+    # 负值防护：FCFF/股权价值为负时模型不适用（常见于重资产低利润率公司按周期口径）
+    if not np.isfinite(per_share) or per_share <= 0:
+        res.error = ("该估值风格/假设下 FCFF 为负，DCF 模型不适用。"
+                     "建议改用「价值股」或「稳健股」风格，或检查利润率/资本开支假设。")
+        return res
 
     price = cd.latest_price()
     upside = (per_share / price - 1) if np.isfinite(price) and price > 0 else np.nan
@@ -216,6 +269,7 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
         "forecast_years": n,
         "revenue_growth": a.revenue_growth,
         "growth_decline": a.growth_decline,
+        "accel": a.accel,
         "terminal_growth": a.terminal_growth,
         "operating_margin": a.operating_margin,
         "tax_rate": a.tax_rate,
@@ -225,6 +279,7 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
         "beta": a.beta,
         "debt_rate": a.debt_rate,
         "wacc": wacc,
+        "base_rev": a.base_rev,
     }
     res.conclusion = conclusion
     res.detail = detail

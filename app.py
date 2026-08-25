@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 DCF 智能估值面板 —— Streamlit 主应用
 
@@ -36,7 +36,7 @@ st.set_page_config(
 class DCFAssumptionsSafe:
     """用于敏感性分析的轻量假设容器（复用 DCFAssumptions 字段）。"""
     def __init__(self, a):
-        for f in ["forecast_years", "revenue_growth", "growth_decline", "terminal_growth",
+        for f in ["forecast_years", "revenue_growth", "growth_decline", "accel", "terminal_growth",
                   "operating_margin", "tax_rate", "capex_pct", "da_pct", "nwc_pct",
                   "beta", "debt_rate", "erp", "rf"]:
             setattr(self, f, getattr(a, f))
@@ -45,7 +45,7 @@ class DCFAssumptionsSafe:
 def _dcf_with_wacc(cd, assump, wacc: float) -> float:
     """用指定 WACC 重算 DCF 每股价值（敏感性分析用）。"""
     a = DCFAssumptions()
-    for f in ["forecast_years", "revenue_growth", "growth_decline", "terminal_growth",
+    for f in ["forecast_years", "revenue_growth", "growth_decline", "accel", "terminal_growth",
               "operating_margin", "tax_rate", "capex_pct", "da_pct", "nwc_pct",
               "beta", "debt_rate", "erp", "rf"]:
         setattr(a, f, getattr(assump, f))
@@ -125,6 +125,17 @@ with st.sidebar:
     st.divider()
     st.caption("💡 输入：A股 6位数字或中文名称（如 600519 / 贵州茅台），美股代码或英文名称（如 AAPL / Apple）。")
 
+    # 估值风格：按公司属性套用不同参数口径
+    style_map = {"auto": "自动识别", "growth": "成长股", "steady": "稳健股",
+                 "value": "价值股", "cyclical": "周期股"}
+    st.markdown("**估值风格**")
+    style = st.radio(
+        "估值风格", list(style_map.keys()),
+        format_func=lambda k: style_map[k], index=0, label_visibility="collapsed",
+        help="按公司属性套用对应估值参数。自动：高增长→成长股、高营收波动→周期股、"
+             "低增长高股息→价值股、其余→稳健股；也可手动指定。",
+    )
+
 # ============ 主区域 ============
 if not run_btn and "cd" not in st.session_state:
     st.markdown("## 👋 欢迎使用 DCF 智能估值面板")
@@ -146,6 +157,7 @@ if run_btn:
     if not symbol:
         st.warning("请输入股票代码")
         st.stop()
+    st.session_state["style"] = style
     with st.spinner(f"正在抓取 {symbol} 数据并计算估值（A股约需15-30秒，美股视网络情况）..."):
         try:
             cd = _fetch_cached(symbol, mkt)
@@ -171,6 +183,11 @@ if "cd" in st.session_state:
     c5.metric("Beta", fmt(cd.beta))
     if cd.industry:
         st.caption(f"行业：{cd.industry}    无风险利率：{cd.rf:.2%}    股权风险溢价：{cd.erp:.2%}")
+    # 估值风格口径显示
+    from src.style_presets import resolve_style, STYLE_LABELS
+    _actual, _ = resolve_style(style, cd)
+    st.caption(f"估值口径：**{STYLE_LABELS[style]}**"
+               + (f"（自动识别为 **{STYLE_LABELS[_actual]}**）" if style == "auto" else ""))
     if cd.notes:
         with st.expander("数据抓取备注"):
             for n in cd.notes:
@@ -213,7 +230,7 @@ if "cd" in st.session_state:
         st.caption("自动生成基准假设，可在下方调整。所有假设改变都会实时重算。")
 
         if "dcf_assump" not in st.session_state:
-            st.session_state["dcf_assump"] = auto_assumptions(cd, wacc_info)
+            st.session_state["dcf_assump"] = auto_assumptions(cd, wacc_info, style=style)
         a = st.session_state["dcf_assump"]
 
         with st.expander("⚙️ 预测假设（可调整）", expanded=True):
@@ -226,6 +243,10 @@ if "cd" in st.session_state:
                 a.growth_decline = st.number_input(
                     "增长率逐年衰减(百分点)", 0.0, 0.10,
                     float(a.growth_decline), step=0.005, format="%.3f")
+                a.accel = st.number_input(
+                    "增长率逐年加速(百分点)", 0.0, 0.05,
+                    float(a.accel), step=0.005, format="%.3f",
+                    help=">0 时增长率逐年递增，适用于成长期公司（成长股默认启用）。")
             with col2:
                 a.terminal_growth = st.number_input(
                     "永续增长率 g", 0.0, 0.06,
@@ -253,8 +274,11 @@ if "cd" in st.session_state:
             with col5:
                 a.debt_rate = st.number_input("债务成本 Rd", 0.0, 0.15, float(a.debt_rate), step=0.005, format="%.3f")
             with col6:
-                st.markdown(f"**WACC ≈ {wacc_info['wacc']:.2%}**（Re={wacc_info['re']:.2%}, Rd={wacc_info['rd']:.2%}, "
-                            f"E={wacc_info['e_weight']:.0%}, D={wacc_info['d_weight']:.0%})")
+                # 用风格调整后的 WACC 显示
+                from src.wacc import calc_wacc as _cw
+                style_wacc = _cw(cd, erp=a.erp, beta=a.beta, debt_rate=a.debt_rate)
+                st.markdown(f"**WACC ≈ {style_wacc['wacc']:.2%}**（Re={style_wacc['re']:.2%}, Rd={style_wacc['rd']:.2%}, "
+                            f"E={style_wacc['e_weight']:.0%}, D={style_wacc['d_weight']:.0%})")
                 if wacc_info.get("note"):
                     st.caption(wacc_info["note"])
 
@@ -273,6 +297,8 @@ if "cd" in st.session_state:
 
             st.markdown(f"**解读**：{dcf_res.detail}  终值占企业价值 **{dcf_res.terminal_ratio:.0%}**"
                         f"，永续假设对结果影响大。")
+            if dcf_res.note:
+                st.warning(dcf_res.note)
 
             colA, colB = st.columns(2)
             with colA:
@@ -338,12 +364,14 @@ if "cd" in st.session_state:
         st.markdown("## DDM 股利贴现模型（两阶段）")
         st.caption("适合稳定分红公司；若公司不分红会给出提示。")
         with st.expander("⚙️ 假设", expanded=True):
+            from src.style_presets import style_terminal_g as _stg
+            _ddm_g2_def = _stg(style, cd.market)
             col1, col2, col3 = st.columns(3)
             g1 = st.number_input("阶段一股利增速", 0.0, 0.50,
                                  float(results.get("ddm_g1", 0.04)), step=0.005, format="%.3f", key="ddm_g1_in")
-            g2 = st.number_input("永续股利增速", 0.0, 0.06, 0.02, step=0.005, format="%.3f", key="ddm_g2_in")
+            g2 = st.number_input("永续股利增速", 0.0, 0.06, _ddm_g2_def, step=0.005, format="%.3f", key="ddm_g2_in")
             yrs = st.slider("阶段一年数", 3, 10, 5, key="ddm_yrs")
-        ddm_res = run_ddm(cd, growth_phase1=g1, growth_phase2=g2, years_phase1=yrs)
+        ddm_res = run_ddm(cd, growth_phase1=g1, growth_phase2=g2, years_phase1=yrs, style=style)
         st.session_state["results"] = {**results, "ddm": ddm_res}
         if ddm_res.error:
             st.warning(ddm_res.error)
@@ -369,12 +397,15 @@ if "cd" in st.session_state:
         mode = col1.radio("反推对象", ["显式期首年收入增长率", "永续增长率"], index=0)
         rev_mode = "growth" if mode == "显式期首年收入增长率" else "terminal"
         with st.expander("⚙️ 固定假设（默认取 DCF 自动值）"):
+            from src.style_presets import style_terminal_g as _stg2
+            _rev_gterm_def = _stg2(style, cd.market)
             c1, c2 = st.columns(2)
             rev_margin = c1.number_input("营业利润率", 0.0, 0.90,
                                          float(results.get("rev_margin", 0.20)), step=0.01, format="%.3f")
             rev_gterm = c2.number_input("永续增长率(反推增长率时用)", 0.0, 0.06,
-                                        float(results.get("rev_gterm", 0.025)), step=0.005, format="%.3f")
-        rev_res = run_reverse_dcf(cd, mode=rev_mode, margin=rev_margin, g_terminal_fixed=rev_gterm)
+                                        float(results.get("rev_gterm", _rev_gterm_def)), step=0.005, format="%.3f")
+        rev_res = run_reverse_dcf(cd, mode=rev_mode, margin=rev_margin,
+                                  g_terminal_fixed=rev_gterm, style=style)
         st.session_state["results"] = {**results, "reverse_dcf": rev_res}
         if rev_res.error:
             st.warning(rev_res.error)

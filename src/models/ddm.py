@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 DDM 股利贴现模型（两阶段）：适合稳定分红、可预测的公司（银行/公用事业/消费龙头）。
 """
@@ -30,15 +30,21 @@ class DDMResult:
 def run_ddm(
     cd: CompanyData,
     growth_phase1: float | None = None,
-    growth_phase2: float = 0.02,
+    growth_phase2: float | None = None,
     years_phase1: int = 5,
     cost_of_equity: float | None = None,
+    style: str = "auto",
 ) -> DDMResult:
     res = DDMResult()
     ann = cd.annual
     if ann is None or len(ann) == 0:
         res.error = "缺少年度财务数据"
         return res
+
+    # 永续增长率按估值风格取值
+    if growth_phase2 is None:
+        from ..style_presets import style_terminal_g
+        growth_phase2 = style_terminal_g(style, cd.market)
 
     # 当前每股股利 = 最近一年分红总额 / 股本
     div_total = cd.last_value("dividends")
@@ -52,15 +58,19 @@ def run_ddm(
     res.dps_now = dps
     res.payout_ratio = div_total / cd.last_value("net_income") if cd.last_value("net_income") > 0 else np.nan
 
-    # 历史分红增速（近5年 CAGR）
+    # 历史分红增速（近5年 CAGR），并用收入增长约束：
+    # 分红增速长期不应大幅超过收入增速（分红率提升阶段的高增速不可持续）。
     if growth_phase1 is None:
+        from .dcf import _trend_growth
+        rev_g = _trend_growth(ann, 5)
         divs = ann["dividends"].dropna()
         divs = divs[divs > 0]
         if len(divs) >= 2:
             cagr = (divs.iloc[-1] / divs.iloc[0]) ** (1 / (len(divs) - 1)) - 1
-            growth_phase1 = float(np.clip(cagr if np.isfinite(cagr) else 0.04, 0.0, 0.30))
+            cap = max(rev_g * 1.2, 0.03)
+            growth_phase1 = float(np.clip(min(cagr if np.isfinite(cagr) else 0.04, cap), 0.0, 0.25))
         else:
-            growth_phase1 = 0.04
+            growth_phase1 = float(np.clip(rev_g * 0.8, 0.0, 0.25))
 
     # 股权成本
     if cost_of_equity is None:

@@ -50,10 +50,14 @@ def cik_for_ticker(ticker: str) -> str | None:
 
 
 def _annual_flows(facts: dict, concept: str) -> dict[int, float]:
-    """流量科目（收入/利润/现金流等）：取年报(10-K)期间值。返回 {财年: 值}"""
+    """流量科目（收入/利润/现金流等）：取年报(10-K)期间值。返回 {财年: 值}
+
+    注意：10-K 里往往同时披露分季度明细（end 为季度末）与财年累计值，
+    必须按「期间最长」取完整年度值，否则会用 Q1 等季度值覆盖年度值。
+    """
     if concept not in facts:
         return {}
-    out: dict[int, list] = {}
+    best: dict[int, tuple[float, int]] = {}
     for unit, arr in facts[concept].get("units", {}).items():
         if unit not in ("USD",):
             continue
@@ -69,22 +73,30 @@ def _annual_flows(facts: dict, concept: str) -> dict[int, float]:
                     dur = (pd.to_datetime(end) - pd.to_datetime(start)).days
                 except Exception:
                     dur = None
-            is_annual = (form == "10-K") or (dur is not None and 350 <= dur <= 380)
+            # 年度判定：有 duration 时须接近完整年度；无 duration 时仅接受 10-K
+            is_annual = False
+            if dur is not None:
+                is_annual = (345 <= dur <= 380)
+            elif form == "10-K":
+                is_annual = True
             if not is_annual:
                 continue
             try:
                 year = int(pd.to_datetime(end).year)
             except Exception:
                 continue
-            out.setdefault(year, []).append(float(item["val"]))
-    return {y: vals[-1] for y, vals in out.items()}
+            # 同一年取期间最长（最接近完整年度）的一条
+            prev = best.get(year)
+            if prev is None or (dur or 0) > prev[1]:
+                best[year] = (float(item["val"]), dur or 0)
+    return {y: v[0] for y, v in best.items()}
 
 
 def _annual_stocks(facts: dict, concept: str) -> dict[int, float]:
     """存量科目（现金/债务/权益等）：取 10-K 财年末值。返回 {财年: 值}"""
     if concept not in facts:
         return {}
-    out: dict[int, list] = {}
+    best: dict[int, tuple[float, str]] = {}
     for unit, arr in facts[concept].get("units", {}).items():
         if unit not in ("USD", "shares"):
             continue
@@ -97,8 +109,11 @@ def _annual_stocks(facts: dict, concept: str) -> dict[int, float]:
                 year = int(pd.to_datetime(end).year)
             except Exception:
                 continue
-            out.setdefault(year, []).append(float(item["val"]))
-    return {y: vals[-1] for y, vals in out.items()}
+            # 同一年取 end 日期最晚的一条（财年末值）
+            prev = best.get(year)
+            if prev is None or end > prev[1]:
+                best[year] = (float(item["val"]), end)
+    return {y: v[0] for y, v in best.items()}
 
 
 def fetch_us_annual_sec(ticker: str) -> pd.DataFrame | None:

@@ -76,10 +76,11 @@ def run_reverse_dcf(
     capex_pct: float | None = None,
     da_pct: float | None = None,
     nwc_pct: float | None = None,
-    g_terminal_fixed: float = 0.025,
+    g_terminal_fixed: float | None = None,
     g0_fixed: float = 0.08,
-    decline: float = 0.0,
+    decline: float | None = None,
     years: int = 5,
+    style: str = "auto",
 ) -> ReverseDCFResult:
     res = ReverseDCFResult()
     res.mode = mode
@@ -90,6 +91,16 @@ def run_reverse_dcf(
     if cd.annual is None or len(cd.annual) == 0:
         res.error = "缺少年度财务数据"
         return res
+
+    # 按估值风格取永续增长率与衰减路径
+    if g_terminal_fixed is None:
+        from ..style_presets import style_terminal_g, resolve_style
+        g_terminal_fixed = style_terminal_g(style, cd.market)
+    if decline is None:
+        from ..style_presets import resolve_style as _rs
+        _, ps = _rs(style, cd)
+        d = ps.get("decline_divisor")
+        decline = float(max((g0_fixed - 0.03) / d, 0.0)) if d else 0.0
 
     w = calc_wacc(cd)
     wacc = w["wacc"] if wacc is None else wacc
