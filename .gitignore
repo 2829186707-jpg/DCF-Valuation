@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Data caches
+data/cache/
+*.parquet
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Streamlit secrets (含 API Key, 绝不提交)
+.streamlit/secrets.toml
+
+# 本地运行配置
+*.log
