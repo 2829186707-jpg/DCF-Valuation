@@ -50,7 +50,11 @@ STYLE_PRESETS: dict[str, dict] = {
         "growth_discount": 0.90,
         "decline_divisor": None,
         "accel": 0.0,
-        "terminal_g": {"A": 0.032, "US": 0.025},
+        # 反向修正(2026-08-26)：与教科书 DCF(永续 A 3.0%/US 2.5%)双跑对比，
+        # 稳态层增强仅 43% 样本更优——低 WACC 高分红公司（银行/公用/资源）在
+        # 更高永续增长率下终值膨胀、系统性高估。故永续增长率调到比传统更保守
+        # (A 2.8%/US 2.3%)，压低低 WACC 终值占比。
+        "terminal_g": {"A": 0.028, "US": 0.023},
         "erp_adj": 0.0,
         "margin_window": 3,
         "normalize": False,

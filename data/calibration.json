@@ -1,18 +1,18 @@
 {
   "version": 2,
-  "updated": "2026-08-26T11:20:26.808399",
+  "updated": "2026-08-26T11:36:57.789496",
   "time_decay": 0.2,
   "ref_year": null,
   "styles": {
     "A:steady": {
       "style": "steady",
       "market": "A",
-      "factor": 1.0737537910264727,
-      "ddm_factor": 1.1874772872991284,
+      "factor": 1.225768600528439,
+      "ddm_factor": 1.2534160615478218,
       "samples": 176,
-      "valid_samples": 33,
+      "valid_samples": 34,
       "hit_rate": 0.5520833333333334,
-      "mean_error": -0.07375379102647261
+      "mean_error": -0.22576860052843895
     },
     "A:value": {
       "style": "value",

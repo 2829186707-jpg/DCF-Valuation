@@ -98,6 +98,51 @@ def _trend_growth(ann: pd.DataFrame, years: int = 5) -> float:
     return float(hist_g)
 
 
+def classic_assumptions(cd: CompanyData, wacc_info: dict) -> DCFAssumptions:
+    """传统教科书 DCF 基准假设（无风格预设、无校准、中性参数）。
+
+    作为「无偏锚」与增强模型对比：所有风格增强（成长加速/周期正常化/
+    价值低折现等）都应相对传统 DCF 带来可验证的改进；若某层增强模型误差
+    反而大于传统 DCF，说明该层风格预设引入了偏差，需反向修正。
+
+    与 auto_assumptions 的差异：
+      - 5 年显式期、增长率不打折/不加速/不衰减（历史趋势 CAGR 原值）
+      - 永续增长率用市场中性值（A 3.0% / US 2.5%），不随风格浮动
+      - 利润率/资本开支比例用近 5 年历史中位数（固定窗口）
+      - ERP 用市场基准（A 5.0% / US 4.2%），不按风格调整
+      - 不做周期正常化（base_rev=None）
+    """
+    from ..style_presets import BASE_ERP
+    a = DCFAssumptions()
+    ann = cd.annual
+    if ann is not None and len(ann) >= 2:
+        rev = ann["revenue"].dropna()
+        if len(rev) >= 2:
+            base_g = _trend_growth(ann, 5)
+            a.revenue_growth = float(max(base_g if np.isfinite(base_g) else 0.05, 0.005))
+        margin = (ann["operating_income"] / ann["revenue"]).dropna()
+        if len(margin):
+            a.operating_margin = float(np.clip(margin.tail(5).median(), 0.005, 0.85))
+        rev_mean = ann["revenue"].replace(0, np.nan).mean()
+        if np.isfinite(rev_mean) and rev_mean > 0:
+            cp = (ann["capex"] / ann["revenue"]).dropna()
+            if len(cp):
+                a.capex_pct = float(np.clip(cp.tail(5).median(), 0.0, 0.6))
+            dp = (ann["da"] / ann["revenue"]).dropna()
+            if len(dp):
+                a.da_pct = float(np.clip(dp.tail(5).median(), 0.0, 0.6))
+            nw = (ann["change_wc"] / ann["revenue"]).dropna()
+            if len(nw):
+                a.nwc_pct = float(np.clip(nw.tail(5).median(), -0.10, 0.20))
+    a.terminal_growth = 0.030 if cd.market == "A" else 0.025
+    a.revenue_growth = max(a.revenue_growth, a.terminal_growth)
+    a.tax_rate = float(wacc_info["tax_rate"])
+    a.beta = float(wacc_info["beta"])
+    a.erp = BASE_ERP.get(cd.market, 0.05)
+    a.rf = wacc_info["rf"]
+    return a
+
+
 def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> DCFAssumptions:
     """按估值风格生成基准假设。style: auto/growth/steady/value/cyclical。"""
     from ..style_presets import resolve_style, style_erp, style_terminal_g, normalize_revenue
