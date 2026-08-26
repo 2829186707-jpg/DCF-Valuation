@@ -43,7 +43,10 @@ class DCFAssumptionsSafe:
 
 
 def _dcf_with_wacc(cd, assump, wacc: float) -> float:
-    """用指定 WACC 重算 DCF 每股价值（敏感性分析用）。"""
+    """用指定 WACC 重算 DCF 每股价值（敏感性分析用）。
+
+    与 run_dcf 保持同一折现约定（年中：现金流折现期 i+0.5，终值折现期 n-0.5）。
+    """
     a = DCFAssumptions()
     for f in ["forecast_years", "revenue_growth", "growth_decline", "accel", "terminal_growth",
               "operating_margin", "tax_rate", "capex_pct", "da_pct", "nwc_pct",
@@ -53,11 +56,12 @@ def _dcf_with_wacc(cd, assump, wacc: float) -> float:
     if r.error or r.forecast is None or len(r.forecast) == 0:
         return np.nan
     rows = r.forecast.copy()
-    ev = sum(rows["FCFF"].iloc[i] / (1 + wacc) ** (i + 1) for i in range(len(rows)))
+    n = len(rows)
+    ev = sum(rows["FCFF"].iloc[i] / (1 + wacc) ** (i + 0.5) for i in range(n))
     if wacc <= a.terminal_growth:
         return np.nan
     tv = rows["FCFF"].iloc[-1] * (1 + a.terminal_growth) / (wacc - a.terminal_growth)
-    ev += tv / (1 + wacc) ** a.forecast_years
+    ev += tv / (1 + wacc) ** (n - 0.5)
     debt = cd.last_value("total_debt")
     cash = cd.last_value("cash")
     if not math.isfinite(debt) or debt < 0:
@@ -355,6 +359,44 @@ if "cd" in st.session_state:
                 ))
                 wf.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10))
                 st.plotly_chart(wf, width="stretch")
+
+            # ===== 三情景估值区间（借鉴 dcf-model 工作流 Scenario Blocks） =====
+            from src.models.dcf import scenario_range
+            st.markdown("#### 三情景估值区间（悲观 / 基准 / 乐观）")
+            scen = scenario_range(cd, a, wacc=dcf_res.wacc)
+            _s1, _s2, _s3 = st.columns(3)
+            scen_vals = []
+            for k, (_sb, _lb) in {"bear": (_s1, "悲观 (Bear)"),
+                                  "base": (_s2, "基准 (Base)"),
+                                  "bull": (_s3, "乐观 (Bull)")}.items():
+                v = scen[k]["value"]
+                if np.isfinite(v):
+                    _sb.metric(_lb, f"{fmt(v)} {cd.currency}", f"{fmt_pct(scen[k]['upside'])} vs 现价")
+                    scen_vals.append(float(v))
+                else:
+                    _sb.metric(_lb, "N/A", f"({scen[k]['error'] or '不适用'})")
+            if len(scen_vals) == 3:
+                st.caption(
+                    f"悲观~乐观区间：**{min(scen_vals):,.2f} ~ {max(scen_vals):,.2f} {cd.currency}**"
+                    f"（跨度 {(max(scen_vals) / min(scen_vals) - 1):.0%}，反映对增长/利润率/折现率假设的敏感度）")
+            st.caption("悲观=增速×0.6/利润率-3pct/WACC+0.5pct/永续率-0.5pct；乐观=增速×1.4/利润率+3pct/"
+                       "WACC-0.5pct/永续率+0.5pct；资本开支与增长加速项同步微调。")
+
+            # ===== Excel 工作簿导出（带公式可编辑，借鉴 dcf-model） =====
+            try:
+                from src.models.excel_export import export_dcf_excel
+                xlsx_bytes = export_dcf_excel(cd, a, dcf_res, wacc=dcf_res.wacc)
+                st.download_button(
+                    "⬇️ 下载可编辑 DCF Excel 工作簿（含敏感性表）",
+                    data=xlsx_bytes,
+                    file_name=f"{cd.symbol}_DCF_Model_{pd.Timestamp.now():%Y%m%d}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+                st.caption("工作簿内所有估值均为活公式：修改黄色输入单元格（增长率/利润率/WACC 等）整表自动重算；"
+                           "敏感性表中心格 = 基准每股价值，可直接改 WACC/永续率对比。")
+            except Exception as e:
+                st.caption(f"Excel 导出暂不可用：{e}")
 
             # 敏感性热力图
             st.markdown("#### 敏感性分析：每股价值 vs (WACC × 永续增长率)")

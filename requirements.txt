@@ -6,3 +6,4 @@ numpy>=1.26
 requests>=2.31
 openai>=1.40
 plotly>=5.20
+openpyxl>=3.0.0

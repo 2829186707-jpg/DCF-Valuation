@@ -45,6 +45,7 @@ class DCFResult:
     terminal_value: float = np.nan
     terminal_pv: float = np.nan
     terminal_ratio: float = np.nan        # 终值现值占EV比例
+    discount_convention: str = "mid-year" # 折现约定：mid-year(年中) / year-end(年末)
     forecast: pd.DataFrame | None = None
     assumptions: dict = field(default_factory=dict)
     conclusion: str = ""
@@ -204,7 +205,14 @@ def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> D
 
 # ---------------- 核心计算 ----------------
 
-def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override: float | None = None) -> DCFResult:
+def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override: float | None = None,
+            mid_year: bool = True) -> DCFResult:
+    """DCF 主计算。
+
+    mid_year: 折现约定。True=年中折现（投行标准：现金流发生在年中，折现期
+    0.5/1.5/…/n-0.5，终值折现期 n-0.5），系统性略高于年末折现（约 ×√(1+WACC)）；
+    False=年末折现（教科书基础口径）。默认为年中（借鉴 dcf-model 工作流 Step 7）。
+    """
     res = DCFResult()
     if cd.annual is None or len(cd.annual) == 0:
         res.error = "缺少年度财务数据"
@@ -274,7 +282,8 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
                     f"已自动下调至 {new_g:.2%}。低 WACC 下终值占比高，估值偏保守，建议结合 DDM 交叉验证。")
         a.terminal_growth = new_g
     tv = fcff_last * (1 + a.terminal_growth) / (wacc - a.terminal_growth)
-    tv_pv = tv / (1 + wacc) ** n
+    # 年中约定：终值发生在第 n 年末，从年中基准折现期 = n - 0.5
+    tv_pv = tv / (1 + wacc) ** (n - 0.5 if mid_year else n)
 
     # 低折现率差距提示：永续增长率接近 WACC 时终值对估值影响极大
     if wacc - a.terminal_growth < 0.02:
@@ -284,7 +293,9 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
     # EV
     ev = 0.0
     for i, row in enumerate(rows):
-        pv = row["FCFF"] / (1 + wacc) ** (i + 1)
+        # 年中约定：现金流发生在第 i+1 年中期，折现期 = i + 0.5
+        period = i + (0.5 if mid_year else 1.0)
+        pv = row["FCFF"] / (1 + wacc) ** period
         ev += pv
         rows[i]["FCFF现值"] = pv
     ev += tv_pv
@@ -336,6 +347,7 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
     res.terminal_value = tv
     res.terminal_pv = tv_pv
     res.terminal_ratio = tv_pv / ev if ev else np.nan
+    res.discount_convention = "mid-year" if mid_year else "year-end"
     # 终值占比告警（借鉴 DCF 工作流验证步骤）：终值占比过高 → 估值高度依赖永续期假设
     if np.isfinite(res.terminal_ratio) and res.terminal_ratio > 0.80:
         res.note = (res.note + " " if res.note else "") + \
@@ -392,3 +404,49 @@ def sensitivity_matrix(
             r = run_dcf(cd, a2, wacc_override=w)
             mat.iloc[i, j] = r.per_share_value if (not r.error and np.isfinite(r.per_share_value)) else np.nan
     return mat
+
+
+def scenario_range(cd: CompanyData, assump: DCFAssumptions, wacc: float | None = None) -> dict:
+    """Bear/Base/Bull 三情景估值区间（借鉴 dcf-model 工作流的 Scenario Blocks）。
+
+    在基准假设（Base）上派生悲/乐观两套假设并重算 DCF：
+      Bear（悲观）：增长率下修(×0.6)、利润率-3pct、WACC+0.5%、永续率-0.5pct、资本开支+1pct、加速项归零
+      Base（基准）：当前自动/手动假设
+      Bull（乐观）：增长率上修(×1.4)、利润率+3pct、WACC-0.5%、永续率+0.5pct、资本开支-1pct、加速项+0.5pct
+    返回 {bear/base/bull: {value, upside, error}}，供面板展示估值区间（而非单点）。
+    """
+    base_w = float(wacc) if wacc is not None else None
+    if base_w is None:
+        from ..wacc import calc_wacc as _cw
+        base_w = float(_cw(cd, beta=assump.beta, debt_rate=assump.debt_rate,
+                           erp=assump.erp, rf=assump.rf)["wacc"])
+    g0 = float(assump.terminal_growth)
+
+    def _derive(mult_g: float, d_margin: float, d_wacc: float, d_g: float,
+                d_capex: float, d_accel: float) -> DCFAssumptions:
+        a2 = DCFAssumptions(**{**assump.__dict__,
+            "revenue_growth": float(np.clip(assump.revenue_growth * mult_g,
+                                            max(g0 - 0.01, 0.005), 0.40)),
+            "operating_margin": float(np.clip(assump.operating_margin + d_margin, 0.01, 0.85)),
+            "terminal_growth": float(np.clip(g0 + d_g, 0.005, 0.06)),
+            "capex_pct": float(np.clip(assump.capex_pct + d_capex, 0.0, 0.60)),
+            "accel": float(max(assump.accel + d_accel, 0.0)),
+        })
+        return a2
+
+    def _pack(r: DCFResult) -> dict:
+        if r.error or not np.isfinite(r.per_share_value):
+            return {"value": np.nan, "upside": np.nan, "error": r.error}
+        return {"value": float(r.per_share_value), "upside": float(r.upside), "error": ""}
+
+    bear_r = run_dcf(cd, _derive(0.6, -0.03, +0.005, -0.005, +0.01, -0.005),
+                     wacc_override=base_w + 0.005)
+    base_r = run_dcf(cd, assump, wacc_override=base_w)
+    bull_r = run_dcf(cd, _derive(1.4, +0.03, -0.005, +0.005, -0.01, +0.005),
+                     wacc_override=max(base_w - 0.005, 0.04))
+    return {
+        "bear": _pack(bear_r),
+        "base": _pack(base_r),
+        "bull": _pack(bull_r),
+        "wacc": base_w,
+    }
