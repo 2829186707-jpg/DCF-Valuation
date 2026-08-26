@@ -230,3 +230,63 @@ def resolve_style(style: str, cd: CompanyData) -> tuple[str, dict]:
     if s == "auto":
         s = auto_detect_style(cd)
     return s, STYLE_PRESETS.get(s, STYLE_PRESETS["steady"])
+
+
+# ---------------- 行业 WACC 参考（借鉴 Dexter/sector-wacc.md） ----------------
+# 典型区间作为起始参考 + 合理性校验锚，非硬约束。数据源不提供真实行业分类，
+# 故用财务特征推断近似行业类别。
+WACC_SECTOR_RANGES: dict[str, tuple[float, float]] = {
+    "Communication Services": (0.08, 0.10),
+    "Consumer Discretionary": (0.08, 0.10),
+    "Consumer Staples": (0.07, 0.08),
+    "Energy": (0.09, 0.11),
+    "Financials": (0.08, 0.10),
+    "Health Care": (0.08, 0.10),
+    "Industrials": (0.08, 0.09),
+    "Information Technology": (0.08, 0.12),
+    "Materials": (0.08, 0.10),
+    "Real Estate": (0.07, 0.09),
+    "Utilities": (0.06, 0.07),
+}
+
+SECTOR_STYLE_MAP = {
+    "growth": "Information Technology",
+    "steady": "Consumer Staples",
+    "value": "Consumer Staples",
+    "cyclical": "Materials",
+}
+
+
+def infer_sector(cd: CompanyData) -> str:
+    """财务特征推断近似行业（用于 WACC 合理性校验提示）。"""
+    style = auto_detect_style(cd)
+    if is_financial(cd):
+        return "Financials"
+    ann = cd.annual
+    beta = cd.beta if np.isfinite(cd.beta) else np.nan
+    capex_ratio = np.nan
+    if ann is not None and len(ann) and "capex" in ann.columns:
+        r = (ann["capex"] / ann["revenue"].replace(0, np.nan)).dropna()
+        if len(r):
+            capex_ratio = float(r.tail(5).median())
+    # 低 beta + 高资本开支 + 稳定 → 公用事业/基础设施
+    if np.isfinite(beta) and beta < 0.5 and np.isfinite(capex_ratio) and capex_ratio > 0.10:
+        return "Utilities"
+    return SECTOR_STYLE_MAP.get(style, "Industrials")
+
+
+def sector_wacc_check(cd: CompanyData, wacc: float) -> str:
+    """行业 WACC 合理性校验：计算值与推断行业的典型区间对比，返回提示文本（空=合理）。
+
+    sector-wacc 表为美股口径（无风险利率约 4.3%）；A 股无风险利率约 2.1%，
+    整体折现率中枢低约 1.5%，故 A 股统一下调区间下沿，避免提示泛滥。
+    """
+    sector = infer_sector(cd)
+    lo, hi = WACC_SECTOR_RANGES.get(sector, (0.08, 0.10))
+    if cd.market == "A":
+        lo, hi = lo - 0.015, hi - 0.015
+    if wacc < lo - 0.005:
+        return f"WACC({wacc:.2%}) 低于 {sector} 行业典型区间({lo:.0%}~{hi:.0%})下沿，估值对折现率敏感，建议复核。"
+    if wacc > hi + 0.02:
+        return f"WACC({wacc:.2%}) 高于 {sector} 行业典型区间({lo:.0%}~{hi:.0%})上沿，估值偏保守。"
+    return ""

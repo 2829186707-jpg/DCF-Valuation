@@ -204,7 +204,7 @@ def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> D
 
 # ---------------- 核心计算 ----------------
 
-def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
+def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override: float | None = None) -> DCFResult:
     res = DCFResult()
     if cd.annual is None or len(cd.annual) == 0:
         res.error = "缺少年度财务数据"
@@ -225,7 +225,7 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
         a.rf = cd.rf
 
     wacc_info = calc_wacc(cd, beta=a.beta, debt_rate=a.debt_rate, erp=a.erp, rf=a.rf)
-    wacc = wacc_info["wacc"]
+    wacc = wacc_info["wacc"] if wacc_override is None else float(wacc_override)
     res.wacc = wacc
 
     # 基准年（周期股用正常化收入，否则最新年）
@@ -336,6 +336,11 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
     res.terminal_value = tv
     res.terminal_pv = tv_pv
     res.terminal_ratio = tv_pv / ev if ev else np.nan
+    # 终值占比告警（借鉴 DCF 工作流验证步骤）：终值占比过高 → 估值高度依赖永续期假设
+    if np.isfinite(res.terminal_ratio) and res.terminal_ratio > 0.80:
+        res.note = (res.note + " " if res.note else "") + \
+                   (f"终值占企业价值 {res.terminal_ratio:.0%}，估值高度依赖永续期假设"
+                    "（低折现率/低永续增长率公司常见），建议结合 DDM/可比公司交叉验证。")
     res.forecast = pd.DataFrame(rows)
     res.assumptions = {
         "forecast_years": n,
@@ -356,3 +361,34 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
     res.conclusion = conclusion
     res.detail = detail
     return res
+
+
+def sensitivity_matrix(
+    cd: CompanyData,
+    assump: DCFAssumptions,
+    wacc_deltas: tuple = (-0.01, 0.0, 0.01),
+    g_deltas: tuple = (-0.005, 0.0, 0.005),
+    base_wacc: float | None = None,
+) -> pd.DataFrame:
+    """DCF 敏感性矩阵（借鉴教科书工作流：WACC × 永续增长率 3×3）。
+
+    在基础假设上对 WACC(±1%) 与永续增长率(±0.5%) 做网格，重算每股内在价值。
+    返回 DataFrame（行=WACC 档，列=永续率档）。WACC-永续率 <1% 的格子留空。
+    """
+    wacc_info = calc_wacc(cd, beta=assump.beta, debt_rate=assump.debt_rate,
+                          erp=assump.erp, rf=assump.rf)
+    base_w = float(wacc_info["wacc"]) if base_wacc is None else float(base_wacc)
+    g0 = float(assump.terminal_growth)
+    index = [f"WACC {base_w + d:.2%}" for d in wacc_deltas]
+    cols = [f"永续 {g0 + gd:.2%}" for gd in g_deltas]
+    mat = pd.DataFrame(np.nan, index=index, columns=cols)
+    for i, wd in enumerate(wacc_deltas):
+        w = base_w + wd
+        for j, gd in enumerate(g_deltas):
+            g = g0 + gd
+            if w - g < 0.01:
+                continue
+            a2 = DCFAssumptions(**{**assump.__dict__, "terminal_growth": g})
+            r = run_dcf(cd, a2, wacc_override=w)
+            mat.iloc[i, j] = r.per_share_value if (not r.error and np.isfinite(r.per_share_value)) else np.nan
+    return mat

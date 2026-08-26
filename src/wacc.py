@@ -16,9 +16,14 @@ def calc_wacc(
     debt_rate: float | None = None,
     erp: float | None = None,
     rf: float | None = None,
+    wacc_floor: float | None = None,
 ) -> dict:
     """
     计算 WACC。返回 {re, rd, tax_rate, e_weight, d_weight, wacc, note}
+
+    wacc_floor: 折现率合理下限（借鉴行业 WACC 参考表：任何公司的折现率
+    不应低于市场合理下限——纯 CAPM 在低 beta 公用事业上会算出 <3% 的
+    荒谬值，导致 Gordon 终值爆炸）。默认 A 5.5% / US 5.0%。
     """
     rf_ = cd.rf if rf is None else rf
     erp_ = cd.erp if erp is None else erp
@@ -75,6 +80,16 @@ def calc_wacc(
 
     rd_after = debt_rate * (1 - tax_rate)
     wacc = e_weight * re + d_weight * rd_after
+
+    # 折现率合理下限（借鉴行业 WACC 参考表）
+    # 纯 CAPM 在低 beta 公司（公用事业/高分红）上会算出 <3% 的折现率，
+    # 使 Gordon 终值爆炸、估值系统性高估。任何公司的折现率都不应低于
+    # 市场合理下限，低于则上调并提示。
+    floor = wacc_floor if wacc_floor is not None else (0.050 if cd.market == "US" else 0.055)
+    if wacc < floor:
+        note = (note + " " if note else "") + \
+               f"WACC({wacc:.2%}) 低于市场合理下限({floor:.2%})，已上调至下限。低折现率会使终值占比过高。"
+        wacc = floor
 
     return {
         "re": float(re),

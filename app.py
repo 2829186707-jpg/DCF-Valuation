@@ -296,6 +296,11 @@ if "cd" in st.session_state:
                             f"E={style_wacc['e_weight']:.0%}, D={style_wacc['d_weight']:.0%})")
                 if wacc_info.get("note"):
                     st.caption(wacc_info["note"])
+                # 行业 WACC 合理性校验（借鉴 Dexter 行业 WACC 参考表）
+                from src.style_presets import sector_wacc_check as _swc
+                _swc_txt = _swc(cd, style_wacc["wacc"])
+                if _swc_txt:
+                    st.caption(_swc_txt)
 
         dcf_res = run_dcf(cd, a)
         st.session_state["results"] = {**results, "dcf": dcf_res}
@@ -358,7 +363,7 @@ if "cd" in st.session_state:
                 g_base = a.terminal_growth
                 waccs = [base_wacc + (i - 2) * 0.005 for i in range(5)]
                 gs = [max(g_base + (i - 2) * 0.005, 0.0) for i in range(5)]
-                mat = np.zeros((5, 5))
+                mat = np.full((5, 5), np.nan)
                 for i, w_ in enumerate(waccs):
                     for j, g_ in enumerate(gs):
                         aa = DCFAssumptionsSafe(a)
