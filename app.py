@@ -614,7 +614,8 @@ if "cd" in st.session_state:
             else:
                 st.markdown("#### 可比公司倍数")
                 if comps_res.peer_table is not None:
-                    tbl = comps_res.peer_table.reset_index()
+                    # drop=False 构造时 index 与 symbol 列重名，reset_index 需 drop（数据不丢）
+                    tbl = comps_res.peer_table.reset_index(drop=True)
                     st.dataframe(tbl, width="stretch", hide_index=True)
                 col1, col2, col3 = st.columns(3)
                 if comps_res.median_pe and math.isfinite(comps_res.median_pe):
