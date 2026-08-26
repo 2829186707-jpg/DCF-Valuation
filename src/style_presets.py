@@ -42,6 +42,8 @@ STYLE_PRESETS: dict[str, dict] = {
         "erp_adj": 0.002,
         "margin_window": 3,
         "normalize": False,
+        "forecast_years": 8,   # 成长股显式预测期更长：5 年高增长后仍有增长惯性，
+                               # 提前进入永续(4%)会低估成长性（回测系统性低估 -41%）
     },
     "steady": {
         "label": "稳健股",
@@ -149,6 +151,30 @@ def _detect_cyclical(cd: CompanyData, ann) -> bool:
             if mn > 0 and mx / mn > 6.0:
                 return True
     return False
+
+
+def is_financial(cd: CompanyData) -> bool:
+    """金融股识别：银行/高杠杆金融机构的 FCFF 结构失真，DCF 不适用。
+
+    财务特征（近 3 年均值）：(有息负债+现金) / 收入 > 5 且 收入 / 净资产 < 0.5。
+    —— 银行负债表规模远大于收入（高杠杆）、净资产相对收入占比高。
+    验证：工行(6.7/0.21)、中行(7.5/0.22)、浦发(9.5/0.23) 命中；
+          茅台(0.36/0.72)、宁德(1.03/1.52) 不命中；长江电力(3.0/0.39) 不命中。
+    全部为有限值才判定，避免数据缺失误判。
+    """
+    ann = cd.annual
+    if ann is None or len(ann) < 2:
+        return False
+    tail = ann.tail(3)
+    rev = float(tail["revenue"].mean())
+    eq = float(tail["total_equity"].mean())
+    debt = float(tail["total_debt"].mean())
+    cash = float(tail["cash"].mean())
+    if not all(np.isfinite([rev, eq, debt, cash])):
+        return False
+    if rev <= 0 or eq <= 0:
+        return False
+    return (debt + cash) / rev > 5.0 and rev / eq < 0.5
 
 
 def auto_detect_style(cd: CompanyData) -> str:

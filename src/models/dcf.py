@@ -106,6 +106,7 @@ def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> D
     style, ps = resolve_style(style, cd)
     ann = cd.annual
     mw = ps["margin_window"]  # 利润率统计窗口
+    a.forecast_years = int(ps.get("forecast_years", 5))  # 成长股显式期更长
 
     if ann is not None and len(ann) >= 2:
         rev = ann["revenue"].dropna()
@@ -164,6 +165,14 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
         res.error = "缺少年度财务数据"
         return res
 
+    # 金融股（银行/高杠杆机构）FCFF 结构失真：利息收入计入 EBIT 且营运资本变动巨大，
+    # DCF 会算出荒谬高值（回测中工行/中行隐含收益高达 30-67 倍）。直接禁用 DCF，改用 DDM。
+    from ..style_presets import is_financial
+    if is_financial(cd):
+        res.error = ("金融股（银行/保险等高杠杆机构）FCFF 结构失真，DCF 模型不适用；"
+                     "建议以 DDM（股利贴现）结果为准。")
+        return res
+
     a = assump or DCFAssumptions()
     if a.erp is None:
         a.erp = cd.erp
@@ -213,8 +222,12 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None) -> DCFResult:
 
     # 终值（Gordon）
     if wacc <= a.terminal_growth:
-        res.error = f"WACC({wacc:.2%}) 必须大于永续增长率({a.terminal_growth:.2%})"
-        return res
+        # 低 WACC 公司（公用事业等低 beta）：永续增长率高于 WACC 会令 Gordon 分母为负。
+        # 自动下调永续增长率到安全边界，保持模型成立并给出提示（而非直接报错）。
+        new_g = max(wacc - 0.01, 0.005)
+        res.note = (f"该股 WACC({wacc:.2%}) 较低，原永续增长率 {a.terminal_growth:.2%} 无法成立，"
+                    f"已自动下调至 {new_g:.2%}。低 WACC 下终值占比高，估值偏保守，建议结合 DDM 交叉验证。")
+        a.terminal_growth = new_g
     tv = fcff_last * (1 + a.terminal_growth) / (wacc - a.terminal_growth)
     tv_pv = tv / (1 + wacc) ** n
 

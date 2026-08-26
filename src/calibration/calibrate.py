@@ -35,23 +35,34 @@ class StyleCalib:
     note: str = ""
 
 
-def _shrink_factor(mean_err: float, n: int, min_n: int = 8) -> float:
-    """收缩：样本不足时向 1.0 靠拢，避免小样本过拟合。"""
+def _shrink_factor(mean_err: float, n: int, min_n: int = 8,
+                   lo: float = 0.5, hi: float = 1.6) -> float:
+    """收缩：样本不足时向 1.0 靠拢，避免小样本过拟合。
+
+    lo/hi 校准系数范围：下调最低 0.5，上调最高 1.6。
+    上调上限 1.4→1.6：回测期 A 股成长/消费龙头估值扩张较快，DCF 相对市场系统性低估。
+    下调下限 0.6→0.5：低增长稳定公司（公用事业/重资产）DCF 终值占比过高、系统性高估，
+    0.6 上限不足以修正（value 层曾长期撞底）。
+    """
     f = 1.0 - mean_err
     if n < min_n:
         w = n / min_n
         f = 1.0 + (f - 1.0) * w
     # 限制校准系数范围（防止过度修正）
-    return float(np.clip(f, 0.6, 1.4))
+    return float(np.clip(f, lo, hi))
 
 
-def _valid_sample(s, method: str) -> tuple[bool, float, float, float]:
+def _valid_sample(s, method: str, style: str | None = None) -> tuple[bool, float, float, float]:
     """质量门槛：判断回测样本对该估值方法是否有效。
     返回 (是否有效, 误差, 隐含收益, 该方法的每股价值)。
 
     排除（仅失真类）：
       - 该方法报错 / 值为 nan
-      - DCF 与 DDM 分歧 > 2 倍（两种方法打架，各自失真，金融/地产 FCFF 失真常见于此）
+      - DCF 与 DDM 分歧过大（两种方法打架，各自失真，金融/地产 FCFF 失真常见于此）
+
+    分歧阈值分风格：growth 层 DCF 用 8 年显式期充分体现成长，与 DDM（固定 5 年）
+    天然分歧大（1.4~4.0 为正常），阈值放宽到 4.0；其他层维持 2.0
+    （金融/周期失真在此层更常见，从严）。
 
     注：不再用 |implied|>3 一刀切剔除——高隐含样本（模型隐含暴涨但实际未兑现）
     往往是「模型高估」的真实信号，剔除会制造"低估"假象。极端值统一由
@@ -62,11 +73,17 @@ def _valid_sample(s, method: str) -> tuple[bool, float, float, float]:
     val = getattr(s, f"intrinsic_{method}", np.nan)
     if not np.isfinite(implied) or not np.isfinite(err) or not np.isfinite(val):
         return False, np.nan, np.nan, np.nan
+    # 隐含收益超 800%：结构性失真。正常公司 DCF 不可能算出股价 8 倍以上价值，
+    # 只有 FCFF 荒谬的金融/极端周期（含历史时点金融识别漏网）才会如此。
+    # 注意这不是旧的 |implied|>3 一刀切——3~8 倍是"模型高估"的真实信号，保留并由 Winsorize 处理。
+    if abs(implied) > 8.0:
+        return False, np.nan, np.nan, np.nan
     # 方法分歧（两种方法都有效时才比较）
     other = getattr(s, f"intrinsic_{'ddm' if method == 'dcf' else 'dcf'}", np.nan)
     if np.isfinite(other) and np.isfinite(val) and other > 0 and val > 0:
         ratio = val / other
-        if ratio > 2.0 or ratio < 0.5:
+        lim = 4.0 if style == "growth" else 2.0
+        if ratio > lim or ratio < 1.0 / lim:
             return False, np.nan, np.nan, np.nan
     return True, err, implied, val
 
@@ -114,14 +131,14 @@ def compute_calibration(samples: list, method: str = "dcf",
         return float(errs_s[idx])
 
     for (style, market), group in keys.items():
-        valid = [_valid_sample(s, method) for s in group]
+        valid = [_valid_sample(s, method, style) for s in group]
         valid = [v for v in valid if v[0]]
         if len(valid) < 3:
             continue
         errs = [v[1] for v in valid]
         ws = []
         for s in group:
-            vv = _valid_sample(s, method)
+            vv = _valid_sample(s, method, style)
             if vv[0]:
                 ws.append(float(np.exp(-time_decay * (ref_year - int(s.year)))))
         # Winsorize 抗极端：保留高隐含样本的方向信号，但压住荒谬值
