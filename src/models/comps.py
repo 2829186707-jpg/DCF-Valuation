@@ -28,9 +28,28 @@ _SW_INFO_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "sw_
 _SW_INFO_TTL = 7 * 24 * 3600  # 申万行业列表 7 天缓存（分类相对静态）
 _SW_CONS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "sw_cons")
 _SW_CONS_TTL = 24 * 3600      # 申万行业成分 24h 缓存（含 PE/PB 快照，避免重复拉取触发限流）
+_SW_MAP_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "sw_sector_map.json")
 
 _sw_info_cache: dict | None = None
 _sw_cons_cache: dict = {}
+_sw_map_cache: dict | None = None
+
+
+def _load_sw_sector_map() -> dict:
+    """个股→申万三级（行业名/代码）映射。由成分缓存反推，零网络。
+
+    优先查此映射（云上不依赖实时 cninfo），未命中再走实时链路。
+    """
+    global _sw_map_cache
+    if _sw_map_cache is not None:
+        return _sw_map_cache
+    try:
+        if os.path.exists(_SW_MAP_FILE):
+            with open(_SW_MAP_FILE, encoding="utf-8") as f:
+                _sw_map_cache = json.load(f).get("map", {})
+    except Exception:
+        _sw_map_cache = {}
+    return _sw_map_cache
 
 
 def _norm_a_symbol(sym: str) -> str:
@@ -262,20 +281,33 @@ def _to_peer_dict(row: pd.Series) -> dict:
 
 
 def auto_peers(cd: CompanyData, limit: int = 6) -> tuple[list[dict], str]:
-    """自动获取同业可比公司。返回 (peer_dicts, sector_name)。失败返回 ([], "")。"""
+    """自动获取同业可比公司。返回 (peer_dicts, sector_name)。失败返回 ([], "")。
+
+    链路（优先零网络）：
+      1. 查 sw_sector_map（成分缓存反推的个股→行业映射，data/sw_sector_map.json）
+      2. 未命中 → cninfo 实时（个股→申万名）→ sw_info（名→代码）→ 成分
+    """
     if cd.market != "A":
         return [], ""   # 美股暂缓
     symbol6 = str(cd.symbol).strip().zfill(6)
-    sw_name = _cninfo_sw_name(symbol6)
-    code = _match_sw_code(sw_name) if sw_name else None
+
+    # 1) 零网络：查本地映射
+    mp = _load_sw_sector_map()
+    hit = mp.get(symbol6)
+    code = hit.get("ind_code") if hit else None
+    sw_name = hit.get("ind_name") if hit else ""
+
+    # 2) 未命中 → cninfo 实时链路（申万新版名 → 巨潮中类兜底）
     if not code:
-        # 无申万记录 → 巨潮行业大类兜底（保险/银行等通用名）
-        alt = _cninfo_giant_name(symbol6)
-        if alt:
-            code = _match_sw_code(alt)
-            if code:
-                sw_name = alt
-    if not sw_name:
+        sw_name = _cninfo_sw_name(symbol6)
+        code = _match_sw_code(sw_name) if sw_name else None
+        if not code:
+            alt = _cninfo_giant_name(symbol6)
+            if alt:
+                code = _match_sw_code(alt)
+                if code:
+                    sw_name = alt
+    if not sw_name and not code:
         return [], ""
     if not code:
         return [], sw_name  # 知道行业但无申万代码 → 让上层提示

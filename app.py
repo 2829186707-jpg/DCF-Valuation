@@ -569,13 +569,17 @@ if "cd" in st.session_state:
         st.markdown("## 可比公司法（相对估值）")
         st.caption("用同业公司中位 PE/PB/EV-EBITDA 给目标公司估值。A 股可自动识别行业并抓取同业。")
         # 自动获取同业（A股申万三级行业链路；美股暂手动）
+        # 防御性读取：不用下标直接读 session_state（Streamlit 脚本异常后
+        # 本次 run 的写入可能被回滚，导致 has-key 检查与读取不一致 → KeyError）。
         _peer_key = f"_auto_peers_{cd.symbol}"
-        if _peer_key not in st.session_state:
+        _auto_peers = st.session_state.get(_peer_key)
+        if not isinstance(_auto_peers, tuple) or len(_auto_peers) != 2:
             try:
-                st.session_state[_peer_key] = auto_peers(cd, limit=6)
+                _auto_peers = auto_peers(cd, limit=6)
             except Exception:
-                st.session_state[_peer_key] = ([], "")
-        auto_peers_res, auto_sector = st.session_state[_peer_key]
+                _auto_peers = ([], "")
+            st.session_state[_peer_key] = _auto_peers
+        auto_peers_res, auto_sector = _auto_peers
         auto_str = ",".join(p["symbol"] for p in auto_peers_res)
         if auto_sector:
             names = "、".join(f'{p["name"]}({p["symbol"]})' for p in auto_peers_res)
