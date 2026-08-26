@@ -257,6 +257,8 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
         nopat = ebit * (1 - a.tax_rate)
         da = rev * a.da_pct
         capex = rev * a.capex_pct
+        maint_capex = da                     # 维护资本开支 ≈ 折旧摊销（维持现有产能）
+        growth_capex = max(capex - da, 0.0)  # 增长资本开支 = 超出维护的扩张性投资
         nwc = rev * a.nwc_pct
         fcff = nopat + da - capex - nwc
         year = cd.latest_year() + i + 1
@@ -266,6 +268,8 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
             "EBIT": ebit,
             "NOPAT": nopat,
             "折旧摊销": da,
+            "维护资本开支": maint_capex,
+            "增长资本开支": growth_capex,
             "资本开支": capex,
             "营运资本变动": nwc,
             "FCFF": fcff,
@@ -353,6 +357,13 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
         res.note = (res.note + " " if res.note else "") + \
                    (f"终值占企业价值 {res.terminal_ratio:.0%}，估值高度依赖永续期假设"
                     "（低折现率/低永续增长率公司常见），建议结合 DDM/可比公司交叉验证。")
+    # 低增长稳定股（value 层，永续率≤2%）终值占比极端时强化提示：
+    # 这类公司自由现金流占比较低，DCF 结果几乎完全由永续假设驱动，DDM 往往更可靠
+    if (np.isfinite(res.terminal_ratio) and res.terminal_ratio > 0.90
+            and a.terminal_growth <= 0.02):
+        res.note = (res.note + " " if res.note else "") + \
+                   ("该股属低增长稳定型，终值占比超过 90%，DCF 结果几乎由永续假设单独决定，"
+                    "不确定性很高；强烈建议以 DDM（股利贴现）结果为主要参考交叉验证。")
     res.forecast = pd.DataFrame(rows)
     res.assumptions = {
         "forecast_years": n,

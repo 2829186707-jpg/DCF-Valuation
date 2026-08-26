@@ -333,6 +333,18 @@ if "cd" in st.session_state:
                     if col != "年份":
                         disp[col] = disp[col].map(lambda x: f"{x:,.0f}" if isinstance(x, (int, float)) else x)
                 st.dataframe(disp, width="stretch", hide_index=True)
+                # 维护 vs 增长资本开支说明（重资产公司 capex 一刀切会低估其真实现金流）
+                if "维护资本开支" in fdf.columns and "增长资本开支" in fdf.columns:
+                    _g_capex = float(fdf["增长资本开支"].iloc[-1])
+                    _m_capex = float(fdf["维护资本开支"].iloc[-1])
+                    _capex_tot = _g_capex + _m_capex
+                    if _capex_tot > 0:
+                        st.caption(
+                            f"资本开支拆分（末年为参考）：维护性（≈折旧）**{_m_capex:,.0f}** / "
+                            f"增长性 **{_g_capex:,.0f}**（占资本开支 {_g_capex/_capex_tot:.0%}）。"
+                            "增长性资本开支代表扩张投资，若公司处于资本开支高峰期（如 5G/新产能建设），"
+                            "FCFF 会被暂时压低，DCF 偏保守；资本开支回落后现金流与估值会上修。"
+                            "可下调「资本开支/收入」假设观察影响。")
 
                 fig = go.Figure()
                 fig.add_bar(x=fdf["年份"], y=fdf["FCFF"], name="FCFF",
@@ -379,6 +391,16 @@ if "cd" in st.session_state:
                 st.caption(
                     f"悲观~乐观区间：**{min(scen_vals):,.2f} ~ {max(scen_vals):,.2f} {cd.currency}**"
                     f"（跨度 {(max(scen_vals) / min(scen_vals) - 1):.0%}，反映对增长/利润率/折现率假设的敏感度）")
+                # 概率加权期望合理估值（25/50/25）
+                w_b, w_m, w_g = 0.25, 0.50, 0.25
+                _exp = w_b * scen["bear"]["value"] + w_m * scen["base"]["value"] + w_g * scen["bull"]["value"]
+                _exp_up = _exp / price - 1 if price and price > 0 else np.nan
+                st.metric(
+                    "期望合理估值（概率加权 25/50/25）",
+                    f"{fmt(_exp)} {cd.currency}",
+                    f"{fmt_pct(_exp_up)} vs 现价",
+                    help="= 悲观×25% + 基准×50% + 乐观×25%。相比单点基准值，综合了三情景的不确定性，"
+                         "更适合作为估值中枢参考。若明显偏离基准，说明三情景不对称（多数源自增长/利润率假设分布）。")
             st.caption("悲观=增速×0.6/利润率-3pct/WACC+0.5pct/永续率-0.5pct；乐观=增速×1.4/利润率+3pct/"
                        "WACC-0.5pct/永续率+0.5pct；资本开支与增长加速项同步微调。")
 
@@ -420,6 +442,33 @@ if "cd" in st.session_state:
                 fig_heat.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10),
                                       xaxis_title="永续增长率", yaxis_title="WACC")
                 st.plotly_chart(fig_heat, width="stretch")
+
+            # ===== 第二张敏感性：收入增长 × 营业利润率（业务驱动因素，借鉴 dcf-model） =====
+            st.markdown("#### 敏感性分析：每股价值 vs (首年收入增长率 × 营业利润率)")
+            with st.spinner("计算业务驱动敏感性..."):
+                g0_ = a.revenue_growth
+                m0_ = a.operating_margin
+                g_grid = [max(g0_ + (i - 2) * 0.03, 0.005) for i in range(5)]
+                m_grid = [min(max(m0_ + (i - 2) * 0.03, 0.01), 0.85) for i in range(5)]
+                mat2 = np.full((5, 5), np.nan)
+                for i, m_ in enumerate(m_grid):
+                    for j, g_ in enumerate(g_grid):
+                        aa = DCFAssumptionsSafe(a)
+                        aa.revenue_growth = g_
+                        aa.operating_margin = m_
+                        r2 = run_dcf(cd, aa)
+                        mat2[i, j] = r2.per_share_value if (not r2.error and math.isfinite(r2.per_share_value)) else np.nan
+                fig_heat2 = go.Figure(go.Heatmap(
+                    z=mat2, x=[f"{g_:.0%}" for g_ in g_grid], y=[f"{m_:.0%}" for m_ in m_grid],
+                    colorscale="RdYlGn", text=np.round(mat2, 1), texttemplate="%{text}",
+                    hovertemplate="收入增长 %{x}<br>利润率 %{y}<br>价值 %{z:.1f}<extra></extra>",
+                ))
+                fig_heat2.update_layout(height=380, margin=dict(l=10, r=10, t=30, b=10),
+                                        xaxis_title="首年收入增长率", yaxis_title="营业利润率")
+                st.plotly_chart(fig_heat2, width="stretch")
+                st.caption("业务驱动敏感性：增长与利润率是 DCF 价值的两大经营驱动。"
+                           "对成长股通常“增长率”维度更敏感，对稳定/价值股通常“利润率”更敏感。"
+                           "Excel 导出工作簿的「Sensitivity-Growth」表与此一致（活公式）。")
 
     # ---------- Tab3 DDM ----------
     with tab_ddm:

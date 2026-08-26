@@ -35,10 +35,14 @@ STYLE_LABELS = {
 STYLE_PRESETS: dict[str, dict] = {
     "growth": {
         "label": "成长股",
-        "growth_discount": 1.0,
+        # 反向修正(2026-08-26)：成长豁免后高成长稳定盈利公司（光模块/电池龙头）
+        # 大量迁入 growth 层，其估值已较充分定价，增强模型 8年期/4%永续/加速易
+        # 高估（reverse_check 更优 54%→46%）。历史增速打 5% 折扣 + 永续率降档
+        # (A 3.5%/US 2.5%) 温和抑制乐观，仍显著高于 steady(2.8%/2.3%) 体现成长性。
+        "growth_discount": 0.95,
         "decline_divisor": None,
         "accel": 0.01,
-        "terminal_g": {"A": 0.040, "US": 0.030},
+        "terminal_g": {"A": 0.035, "US": 0.025},
         "erp_adj": 0.002,
         "margin_window": 3,
         "normalize": False,
@@ -64,7 +68,12 @@ STYLE_PRESETS: dict[str, dict] = {
         "growth_discount": 0.75,
         "decline_divisor": 5,
         "accel": 0.0,
-        "terminal_g": {"A": 0.025, "US": 0.020},
+        # 反向修正(2026-08-26)：value 层校准系数长期撞 0.5 下限（均值误差 +70%，
+        # 系统性高估压不住），根因是低增长稳定公司 FCFF 中自由现金流占比低、
+        # 估值高度依赖永续期（终值占比常 >85%）。永续增长率再降档
+        # (A 2.0%/US 1.5%，比传统 DCF 的 A3.0%/US2.5% 更保守)以压缩终值贡献，
+        # 让 DCF 更接近"现金流折现"而非"永续假设折现"。
+        "terminal_g": {"A": 0.020, "US": 0.015},
         "erp_adj": -0.003,
         "margin_window": 3,
         "normalize": False,
@@ -128,9 +137,24 @@ def _detect_cyclical(cd: CompanyData, ann) -> bool:
       ② 营收变异系数 > 0.6
       ③ 净利率变异系数 > 0.7
       ④ 净利峰谷比（近8年全为正时最大/最小 > 6 倍）
+
+    成长豁免（2026-08-26）：高速成长且盈利稳定的公司（如光模块/动力电池龙头）
+    营收因基数扩张变异系数天然高（0.6~0.9），但这是"规模扩张"而非"景气周期"。
+    若近5年营收 CAGR>15% 且净利率变异系数 <0.45（盈利能力稳定），豁免周期判定，
+    让其进入 growth 层——否则正常化收入会把高成长公司压回低基数、系统性低估。
+    验证：天孚通信(CAGR50%/niCV0.13)→growth、宁德时代(34%/0.21)→growth、
+    胜宏科技(27%/0.40)→growth；中国船舶(26%/0.83，真周期)→cyclical 保留；
+    中芯国际(17%/0.68，半导体周期)→cyclical 保留。
     """
     if ann is None or len(ann) < 4:
         return False
+    # 成长豁免：高成长 + 盈利稳定 → 营收 CV 高是扩张而非周期
+    g = _hist_cagr(cd, 5)
+    if np.isfinite(g) and g > 0.15 and "net_income" in ann.columns:
+        ni_m = (ann["net_income"] / ann["revenue"].replace(0, np.nan)).dropna().tail(8)
+        if len(ni_m) >= 4 and ni_m.mean() > 0:
+            if float(ni_m.std() / abs(ni_m.mean())) < 0.45:
+                return False
     # ① 营业利润率变异系数（主信号）
     margin = (ann["operating_income"] / ann["revenue"]).dropna().tail(8)
     if len(margin) >= 4 and margin.mean() > 0:
@@ -165,6 +189,15 @@ def is_financial(cd: CompanyData) -> bool:
     验证：工行(6.7/0.21)、中行(7.5/0.22)、浦发(9.5/0.23) 命中；
           茅台(0.36/0.72)、宁德(1.03/1.52) 不命中；长江电力(3.0/0.39) 不命中。
     全部为有限值才判定，避免数据缺失误判。
+
+    保险/投资控股补充信号（2026-08-26）：保险（平安/人寿等）负债结构特殊，
+    银行型指标(负债+现金)/收入常仅 ~0.9（浮存金不在有息负债口径），且权益字段
+    常缺失，银行判定漏网；但其"资金池"特征明显——营运现金流远超净利润（含
+    准备金/投资资金沉淀）且账面现金高企。若 营运现金流/净利润 > 2.5 且 现金/收入 > 0.2，
+    判为金融机构，DCF 同样失真，改用 DDM。
+    验证：平安(3.38/0.67)、中国人寿(3.84/0.25)、招行(2.80/1.81)、工行(3.52/4.41)
+          命中；移动(2.09/0.19)、长电(1.96/0.08)、神华(1.52/0.40)、石化(3.32/0.05)
+          不命中（cfo/ni 高但现金/收入低，非资金池型）。
     """
     ann = cd.annual
     if ann is None or len(ann) < 2:
@@ -175,10 +208,27 @@ def is_financial(cd: CompanyData) -> bool:
     debt = float(tail["total_debt"].mean())
     cash = float(tail["cash"].mean())
     if not all(np.isfinite([rev, eq, debt, cash])):
-        return False
-    if rev <= 0 or eq <= 0:
-        return False
-    return (debt + cash) / rev > 5.0 and rev / eq < 0.5
+        # 银行型判定因权益缺失无法进行时，回退到保险信号再判
+        eq = np.nan
+    if np.isfinite(rev) and rev > 0 and np.isfinite(eq) and eq > 0 \
+            and np.isfinite(debt) and np.isfinite(cash):
+        if (debt + cash) / rev > 5.0 and rev / eq < 0.5:
+            return True
+    # 保险/投资控股"资金池"信号
+    # 必要条件：折旧摊销缺失（保险无固定资产折旧；重资产制造如中船/中芯 cfo/ni
+    # 同样高——来自折旧加回/订单周期，但 da 存在，需排除）
+    da = ann["da"].dropna() if "da" in ann.columns else pd.Series(dtype=float)
+    da_missing = len(da) == 0
+    if da_missing and "cfo" in ann.columns and "net_income" in ann.columns:
+        cfo = ann["cfo"].dropna().tail(3)
+        ni = ann["net_income"].dropna().tail(3)
+        cash_s = ann["cash"].dropna().tail(3)
+        rev_s = ann["revenue"].dropna().tail(3)
+        if len(cfo) >= 2 and len(ni) >= 2 and len(cash_s) >= 2 and len(rev_s) >= 2:
+            if ni.mean() > 0 and rev_s.mean() > 0:
+                if cfo.mean() / ni.mean() > 2.5 and cash_s.mean() / rev_s.mean() > 0.2:
+                    return True
+    return False
 
 
 def auto_detect_style(cd: CompanyData) -> str:
@@ -204,9 +254,14 @@ def auto_detect_style(cd: CompanyData) -> str:
 
 
 def normalize_revenue(cd: CompanyData, window: int = 8) -> float | None:
-    """周期股正常化收入：近 N 年收入中位数（避免周期峰谷失真）。
+    """周期股正常化收入：周期均值收入（避免周期峰谷失真）。
 
-    仅当最新营收与历史中位数处于同一量级（0.5~2.0 倍）时启用，
+    基准选择（2026-08-26 增长感知）：
+      - 周期成长股（近5年营收 CAGR>8%）：用近 3 年均值——其收入处上行通道，
+        8 年中位数会把成长中段拖回低基数、系统性低估（周期成长股命中率 38%
+        偏弱的主因之一）。
+      - 纯周期股（增速平稳/下行）：用近 N 年收入中位数（抗峰谷）。
+    仅当最新营收与基准处于同一量级（0.5~2.0 倍）时启用，
     避免把「已成长上台阶」的公司（如最新营收数倍于历史均值）错误拉回低基数。
     """
     ann = cd.annual
@@ -214,21 +269,31 @@ def normalize_revenue(cd: CompanyData, window: int = 8) -> float | None:
         return None
     rev = ann["revenue"].dropna().tail(window)
     if len(rev) >= 4:
-        med = float(rev.median())
         latest = float(rev.iloc[-1])
-        if med > 0 and latest > 0:
-            ratio = latest / med
+        g5 = _hist_cagr(cd, 5)
+        if np.isfinite(g5) and g5 > 0.08:
+            base = float(rev.tail(3).mean())   # 周期成长：近3年均值
+        else:
+            base = float(rev.median())         # 纯周期：中位数抗峰谷
+        if base > 0 and latest > 0:
+            ratio = latest / base
             if 0.5 <= ratio <= 2.0:
-                return med
+                return base
             return None  # 已上台阶，不适用均值回归
     return None
 
 
 def resolve_style(style: str, cd: CompanyData) -> tuple[str, dict]:
-    """把 'auto' 解析为具体风格，返回 (实际风格, 参数表)。"""
-    s = style if style in STYLE_PRESETS else "steady"
-    if s == "auto":
+    """把 'auto' 解析为具体风格，返回 (实际风格, 参数表)。
+
+    修复(2026-08-26)：此前 `s = style if style in STYLE_PRESETS else "steady"`
+    因 STYLE_PRESETS 无 "auto" key，导致 auto 永远落回 steady，面板"自动识别"
+    从未真正触发。校准/回测不受影响（它们直接调 auto_detect_style）。
+    """
+    if style == "auto":
         s = auto_detect_style(cd)
+        return s, STYLE_PRESETS[s]
+    s = style if style in STYLE_PRESETS else "steady"
     return s, STYLE_PRESETS.get(s, STYLE_PRESETS["steady"])
 
 

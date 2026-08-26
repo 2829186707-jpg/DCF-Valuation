@@ -1,47 +1,47 @@
 {
   "version": 2,
-  "updated": "2026-08-26T12:41:09.127263",
+  "updated": "2026-08-26T13:05:02.624249",
   "time_decay": 0.2,
   "ref_year": null,
   "styles": {
     "A:growth": {
       "style": "growth",
       "market": "A",
-      "factor": 1.0275678021155972,
-      "ddm_factor": 0.9836475169932128,
-      "samples": 105,
-      "valid_samples": 36,
-      "hit_rate": 0.5806451612903226,
-      "mean_error": -0.027567802115597173
+      "factor": 1.2274124926622898,
+      "ddm_factor": 1.1699361455331645,
+      "samples": 217,
+      "valid_samples": 57,
+      "hit_rate": 0.5,
+      "mean_error": -0.2274124926622899
     },
     "A:steady": {
       "style": "steady",
       "market": "A",
       "factor": 1.1079243509597285,
-      "ddm_factor": 1.1925136886817307,
+      "ddm_factor": 1.2049986979928513,
       "samples": 176,
-      "valid_samples": 35,
-      "hit_rate": 0.5520833333333334,
+      "valid_samples": 34,
+      "hit_rate": 0.5494505494505495,
       "mean_error": -0.10792435095972863
     },
     "A:value": {
       "style": "value",
       "market": "A",
-      "factor": 0.5,
-      "ddm_factor": 0.5,
+      "factor": 0.5726661811112598,
+      "ddm_factor": 0.5726661811112598,
       "samples": 64,
       "valid_samples": 11,
-      "hit_rate": 0.6666666666666666,
-      "mean_error": 0.7046261812987414
+      "hit_rate": 0.52,
+      "mean_error": 0.4273338188887402
     },
     "A:cyclical": {
       "style": "cyclical",
       "market": "A",
       "factor": 1.5368911487208419,
-      "ddm_factor": 1.5368911487208419,
-      "samples": 265,
-      "valid_samples": 43,
-      "hit_rate": 0.38461538461538464,
+      "ddm_factor": 1.3847287030987512,
+      "samples": 153,
+      "valid_samples": 24,
+      "hit_rate": 0.46938775510204084,
       "mean_error": -0.5368911487208419
     }
   }

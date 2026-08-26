@@ -249,6 +249,68 @@ def build_dcf_workbook(cd: CompanyData, assump: DCFAssumptions, dcf_res: DCFResu
                  fill=FILL_CENTER if is_center else None)
     for col in "ABCDEFG":
         ws2.column_dimensions[col].width = 13
+
+    # ============ Sheet 3: Sensitivity-Growth（收入增长 × 营业利润率） ============
+    # 借鉴 dcf-model 工作流的"驱动因素敏感性"：除 WACC×g 外，增长与利润率
+    # 是 DCF 价值的两大业务驱动。每格用该格(增长率, 利润率)完整重算 DCF，
+    # 引用 DCF 页其余输入（capex/da/nwc/tax/净债务/股本），改动自动联动。
+    ws3 = wb.create_sheet("Sensitivity-Growth")
+    ws3.sheet_view.showGridLines = False
+    _set(ws3, "A1", "敏感性分析：每股内在价值 vs (首年收入增长率 × 营业利润率)", font=FONT_TITLE)
+    _set(ws3, "A2", "中心格(蓝底加粗)=基准假设，应等于 DCF 页「每股内在价值」。其余输入（税率/capex/折旧/营运资本/净债务/股本）引用 DCF 页，改动自动联动。",
+         font=Font(size=9, color="808080"))
+
+    g0 = float(assump.revenue_growth)
+    m0 = float(assump.operating_margin)
+    g_grid = [max(g0 + (i - 2) * 0.03, 0.005) for i in range(5)]
+    m_grid = [min(max(m0 + (i - 2) * 0.03, 0.01), 0.85) for i in range(5)]
+
+    _set(ws3, "B4", "增长率 \\ 利润率", font=FONT_BOLD, fill=FILL_SUBHEAD, border=True)
+    for j, g in enumerate(g_grid):
+        col = get_column_letter(3 + j)  # C..G
+        _set(ws3, f"{col}4", g, font=FONT_BOLD, number_format=PCT, fill=FILL_SUBHEAD, border=True)
+    for i, m in enumerate(m_grid):
+        r = 5 + i
+        _set(ws3, f"B{r}", m, font=FONT_BOLD, number_format=PCT, fill=FILL_SUBHEAD, border=True)
+
+    def _growth_seq(g_cell: str) -> list[str]:
+        """第1~n年增长率公式序列（引用 DCF 页 B5 衰减/B6 加速/B8 终值率）。"""
+        return [f"MAX({g_cell}-$B$5*{k}+$B$6*{k},$B$8-0.01)" for k in range(n)]
+
+    def _gm_cell_formula(g_cell: str, m_cell: str) -> str:
+        gs = _growth_seq(g_cell)
+        # 收入递推（展开乘积）
+        revs = []
+        prev = "$B$19"
+        for k, g in enumerate(gs):
+            prev = f"{prev}*(1+{g})"
+            revs.append(prev)
+        # 单位 FCFF/收入 = margin*(1-tax) + da - capex - nwc（margin 为该格值）
+        unit = f"({m_cell}*(1-$B$10)+$B$12-$B$11-$B$13)"
+        terms = []
+        for k, rev in enumerate(revs):
+            pv = f"{rev}*{unit}/(1+$C$28)^{k + 0.5}"
+            terms.append(pv)
+        tv = (f"{revs[-1]}*{unit}*(1+$B$8)/($C$28-$B$8)"
+              f"/(1+$C$28)^($B$7-0.5)")
+        body = "+".join(terms + [tv])
+        return f"=IF(OR($B$7<=0,{g_cell}<=$B$8-0.011,{m_cell}<=0.005),\"\",({body}-$B$20)/$B$21)"
+
+    for i, m in enumerate(m_grid):
+        r = 5 + i
+        m_cell = f"$B{r}"
+        for j, g in enumerate(g_grid):
+            col = get_column_letter(3 + j)
+            g_cell = f"{col}$4"
+            is_center = (i == 2 and j == 2)
+            _set(ws3, f"{col}{r}", _gm_cell_formula(g_cell, m_cell),
+                 font=FONT_BOLD if is_center else FONT_FORMULA,
+                 number_format=NUM2, border=True,
+                 fill=FILL_CENTER if is_center else None)
+
+    for col in "ABCDEFG":
+        ws3.column_dimensions[col].width = 13
+
     for col in "ABCDEFGH":
         ws.column_dimensions[col].width = 13
     ws.column_dimensions["A"].width = 34
