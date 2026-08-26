@@ -235,6 +235,60 @@ if "cd" in st.session_state:
 
     results = st.session_state.get("results", {})
 
+    # ========== 统一预计算所有方法（不依赖用户先访问对应 Tab） ==========
+    # Streamlit 的 Tab 是惰性渲染：只有激活的 Tab 内代码会执行。若用户先看
+    # 综合研判而没点过 DCF/DDM/可比 Tab，results 将缺失对应方法 → 综合研判
+    # "有时有目标价、有时没有"。这里输入股票后统一预计算一次，保证综合研判
+    # 始终拿到完整数据；各 Tab 内参数调整仍会覆盖对应方法。
+    _pre_key = f"_precomputed_{cd.symbol}"
+    if not st.session_state.get(_pre_key):
+        try:
+            from src.style_presets import style_terminal_g as _pre_stg
+            from src.wacc import calc_wacc as _pre_cw
+            # DCF：生成默认假设并写入 session_state（DCF Tab 直接复用，保持一致）
+            _pre_dcf_assump = None
+            try:
+                _pre_dcf_assump = auto_assumptions(cd, wacc_info, style=style)
+            except Exception:
+                _pre_dcf_assump = auto_assumptions(cd, wacc_info, style="auto")
+            if "dcf_assump" not in st.session_state:
+                st.session_state["dcf_assump"] = _pre_dcf_assump
+            _pre_dcf = run_dcf(cd, _pre_dcf_assump)
+            results = {**results, "dcf": _pre_dcf}
+            # DDM：用与 DDM Tab 一致的默认参数
+            _pre_g2 = _pre_stg(style, cd.market)
+            _pre_re = _pre_cw(cd)["re"]
+            _pre_ddm = run_ddm(cd, growth_phase1=0.04, growth_phase2=_pre_g2,
+                               years_phase1=5, cost_of_equity=_pre_re, style=style)
+            results = {**results, "ddm": _pre_ddm}
+            # 反向 DCF：默认反推显式期首年收入增速
+            _pre_wacc = _pre_dcf.wacc if math.isfinite(_pre_dcf.wacc) else 0.10
+            _pre_rev = run_reverse_dcf(cd, mode="growth",
+                                       margin=_pre_dcf_assump.operating_margin,
+                                       g_terminal_fixed=_pre_g2,
+                                       wacc=_pre_wacc,
+                                       capex_pct=_pre_dcf_assump.capex_pct,
+                                       da_pct=_pre_dcf_assump.da_pct,
+                                       nwc_pct=_pre_dcf_assump.nwc_pct,
+                                       style=style)
+            results = {**results, "reverse_dcf": _pre_rev}
+            # 可比公司：自动同业（A股申万链路），有同业才估值
+            _peer_pre = st.session_state.get(f"_auto_peers_{cd.symbol}")
+            if not (isinstance(_peer_pre, tuple) and len(_peer_pre) == 2):
+                try:
+                    _peer_pre = auto_peers(cd, limit=6)
+                except Exception:
+                    _peer_pre = ([], "")
+                st.session_state[f"_auto_peers_{cd.symbol}"] = _peer_pre
+            if _peer_pre and _peer_pre[0]:
+                _pre_comps = run_comps(cd, [p["symbol"] for p in _peer_pre[0]])
+                results = {**results, "comps": _pre_comps}
+        except Exception:
+            # 预计算失败不阻塞主流程（Tab 内仍会按需重算）
+            pass
+        st.session_state["results"] = results
+        st.session_state[_pre_key] = True
+
     # ---------- Tab2 DCF ----------
     with tab_dcf:
         st.markdown("## DCF 现金流折现（FCFF 两阶段）")
