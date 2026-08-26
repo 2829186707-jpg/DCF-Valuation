@@ -19,7 +19,7 @@ from src.data_fetcher import fetch_company, detect_market
 from src.models.dcf import DCFAssumptions, auto_assumptions, run_dcf
 from src.models.ddm import run_ddm
 from src.models.reverse_dcf import run_reverse_dcf
-from src.models.comps import run_comps
+from src.models.comps import run_comps, auto_peers
 from src.methodology import METHODOLOGY
 from src.ai_advisor import PROVIDERS, build_prompt, call_ai, rule_based_summary
 
@@ -391,16 +391,26 @@ if "cd" in st.session_state:
                 st.caption(
                     f"悲观~乐观区间：**{min(scen_vals):,.2f} ~ {max(scen_vals):,.2f} {cd.currency}**"
                     f"（跨度 {(max(scen_vals) / min(scen_vals) - 1):.0%}，反映对增长/利润率/折现率假设的敏感度）")
-                # 概率加权期望合理估值（25/50/25）
-                w_b, w_m, w_g = 0.25, 0.50, 0.25
+                # 概率加权期望合理估值（默认 25/50/25，可自定义权重；归一化）
+                st.caption("**期望合理估值权重**（默认 25/50/25，可调）：")
+                wc1, wc2, wc3 = st.columns(3)
+                w_b0 = wc1.number_input("悲观权重", 0.0, 1.0, 0.25, 0.05)
+                w_m0 = wc2.number_input("基准权重", 0.0, 1.0, 0.50, 0.05)
+                w_g0 = wc3.number_input("乐观权重", 0.0, 1.0, 0.25, 0.05)
+                _wsum = w_b0 + w_m0 + w_g0
+                if _wsum <= 0:
+                    _wsum, w_b0, w_m0, w_g0 = 1.0, 0.25, 0.50, 0.25
+                w_b, w_m, w_g = w_b0 / _wsum, w_m0 / _wsum, w_g0 / _wsum
                 _exp = w_b * scen["bear"]["value"] + w_m * scen["base"]["value"] + w_g * scen["bull"]["value"]
                 _exp_up = _exp / price - 1 if price and price > 0 else np.nan
                 st.metric(
-                    "期望合理估值（概率加权 25/50/25）",
+                    f"期望合理估值（概率加权 {w_b:.0%}/{w_m:.0%}/{w_g:.0%}）",
                     f"{fmt(_exp)} {cd.currency}",
                     f"{fmt_pct(_exp_up)} vs 现价",
-                    help="= 悲观×25% + 基准×50% + 乐观×25%。相比单点基准值，综合了三情景的不确定性，"
-                         "更适合作为估值中枢参考。若明显偏离基准，说明三情景不对称（多数源自增长/利润率假设分布）。")
+                    help=f"= 悲观×{w_b:.0%} + 基准×{w_m:.0%} + 乐观×{w_g:.0%}（已归一化）。"
+                         "相比单点基准值，综合了三情景的不确定性，更适合作为估值中枢参考。"
+                         "默认 25/50/25 为基于历史校准误差分布的简化近似，可按个人判断调整。"
+                         "若明显偏离基准，说明三情景不对称（多数源自增长/利润率假设分布）。")
             st.caption("悲观=增速×0.6/利润率-3pct/WACC+0.5pct/永续率-0.5pct；乐观=增速×1.4/利润率+3pct/"
                        "WACC-0.5pct/永续率+0.5pct；资本开支与增长加速项同步微调。")
 
@@ -557,14 +567,38 @@ if "cd" in st.session_state:
     # ---------- Tab5 可比公司 ----------
     with tab_comps:
         st.markdown("## 可比公司法（相对估值）")
-        st.caption("输入同业公司代码，用同业中位 PE/PB/EV-EBITDA 给目标公司估值。")
+        st.caption("用同业公司中位 PE/PB/EV-EBITDA 给目标公司估值。A 股可自动识别行业并抓取同业。")
+        # 自动获取同业（A股申万三级行业链路；美股暂手动）
+        _peer_key = f"_auto_peers_{cd.symbol}"
+        if _peer_key not in st.session_state:
+            try:
+                st.session_state[_peer_key] = auto_peers(cd, limit=6)
+            except Exception:
+                st.session_state[_peer_key] = ([], "")
+        auto_peers_res, auto_sector = st.session_state[_peer_key]
+        auto_str = ",".join(p["symbol"] for p in auto_peers_res)
+        if auto_sector:
+            names = "、".join(f'{p["name"]}({p["symbol"]})' for p in auto_peers_res)
+            st.success(f"已自动识别行业 **{auto_sector}**，自动抓取同业（市值相近优先）：{names}")
+        elif cd.market == "A":
+            st.info("未能自动识别行业（申万分类缺失），可手动输入同业代码。")
+        else:
+            st.caption("美股暂不支持自动同业，请手动输入可比公司代码。")
         st.markdown(
             "**示例**：若目标是 `600519`（贵州茅台），可比公司可填：`000858`（五粮液）`000568`（泸州老窖）"
             "`600809`（山西汾酒）`002304`（洋河股份）。美股示例：`AAPL` 可比 `MSFT` `GOOGL` `META` `NVDA`。")
-        default_peers = {"600519": "000858,000568,600809,002304",
-                         "AAPL": "MSFT,GOOGL,META,NVDA"}.get(cd.symbol, "")
-        peer_input = st.text_input("可比公司代码（用英文逗号分隔）", value=default_peers)
+        hardcoded = {"600519": "000858,000568,600809,002304",
+                     "AAPL": "MSFT,GOOGL,META,NVDA"}.get(cd.symbol, "")
+        default_peers = auto_str or hardcoded
+        peer_input = st.text_input("可比公司代码（用英文逗号分隔，留空自动使用上方同业）",
+                                   value=default_peers)
         peer_list = [s.strip().upper() for s in peer_input.replace("，", ",").split(",") if s.strip()]
+        # 用户手动输入时也可与自动同业合并去重（以手动为准，自动补全）
+        if peer_list and auto_peers_res:
+            auto_syms = [p["symbol"] for p in auto_peers_res]
+            merged = list(dict.fromkeys(peer_list + auto_syms))
+            if len(merged) > len(peer_list):
+                peer_list = merged
         if not peer_list:
             st.info("请输入至少 1 家可比公司代码。")
         else:

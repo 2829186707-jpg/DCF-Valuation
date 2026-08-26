@@ -33,6 +33,9 @@ class DCFAssumptions:
     erp: float | None = None
     rf: float | None = None
     base_rev: float | None = None         # 周期股正常化收入基准（None=用最新年）
+    capex_normalize: float | None = None  # 稳态资本开支/收入（None=不启用）。
+                                          # 高再投资扩张期公司：预测期后段 capex 向此水平收敛
+                                          # （投资周期结束后 FCFF 释放），避免"永远扩张"系统性低估。
 
 
 @dataclass
@@ -186,6 +189,22 @@ def auto_assumptions(cd: CompanyData, wacc_info: dict, style: str = "auto") -> D
             if len(nw):
                 a.nwc_pct = float(np.clip(nw.tail(mw).median(), -0.10, 0.20))
 
+        # ---- 资本开支生命周期判断 ----
+        # 高再投资重资产公司（capex 显著高于折旧）若处于投资扩张期，预测期后段
+        # 资本开支应向"维护 + 部分增长投资"的稳态水平收敛（投资周期结束后 FCFF
+        # 释放），避免把一次性产能扩张当成永久性高再投资而系统性低估。
+        # 稳态保留 40% 增长投资惯性（不假设投资归零，只假设增速放慢）。
+        # 触发条件（同时满足）：
+        #   ① capex/da > 1.5（投资显著高于折旧）
+        #   ② da/收入 ≥ 3% 且 capex/收入 ≥ 6%（确为重资产高投入）
+        #   ③ 近 3 年 capex/收入 下降 ≥1pct（投资周期进入尾声，如 5G 建设高峰已过；
+        #      仍在扩张/高位投入的公司——宁德/神华——不收敛，避免高估）
+        cpr = (ann["capex"] / ann["revenue"]).dropna() if "capex" in ann and "revenue" in ann else pd.Series(dtype=float)
+        cpr_trend = (cpr.tail(3).iloc[-1] - cpr.tail(3).iloc[0]) if len(cpr) >= 3 else 0.0
+        if (a.da_pct >= 0.03 and a.capex_pct >= 0.06 and a.da_pct > 0
+                and a.capex_pct / a.da_pct > 1.5 and cpr_trend < -0.01):
+            a.capex_normalize = float(a.da_pct + (a.capex_pct - a.da_pct) * 0.4)
+
         # 周期股：正常化收入基准（周期均值）
         if ps["normalize"]:
             base = normalize_revenue(cd, window=8)
@@ -256,7 +275,15 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
         ebit = rev * a.operating_margin
         nopat = ebit * (1 - a.tax_rate)
         da = rev * a.da_pct
-        capex = rev * a.capex_pct
+        # 资本开支：若启用 capex_normalize（扩张期→稳态收敛），capex/收入沿预测期
+        # 线性过渡到稳态水平，反映投资周期结束后资本开支回落、FCFF 释放。
+        if a.capex_normalize is not None:
+            # 收敛进度：第 0 年保持当前强度，第 n-1 年达到稳态
+            frac = (i / (n - 1)) ** 0.7 if n > 1 else 1.0
+            eff_capex_pct = a.capex_pct + (a.capex_normalize - a.capex_pct) * frac
+            capex = rev * eff_capex_pct
+        else:
+            capex = rev * a.capex_pct
         maint_capex = da                     # 维护资本开支 ≈ 折旧摊销（维持现有产能）
         growth_capex = max(capex - da, 0.0)  # 增长资本开支 = 超出维护的扩张性投资
         nwc = rev * a.nwc_pct
@@ -380,6 +407,7 @@ def run_dcf(cd: CompanyData, assump: DCFAssumptions | None = None, wacc_override
         "debt_rate": a.debt_rate,
         "wacc": wacc,
         "base_rev": a.base_rev,
+        "capex_normalize": a.capex_normalize,
     }
     res.conclusion = conclusion
     res.detail = detail
