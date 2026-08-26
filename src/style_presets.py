@@ -355,3 +355,45 @@ def sector_wacc_check(cd: CompanyData, wacc: float) -> str:
     if wacc > hi + 0.02:
         return f"WACC({wacc:.2%}) 高于 {sector} 行业典型区间({lo:.0%}~{hi:.0%})上沿，估值偏保守。"
     return ""
+
+
+# ---------------- 综合研判：风格 × 估值方法 权重矩阵 ----------------
+# 核心思想：不同公司类型下，各估值方法的可信度不同，综合目标价应是
+# "方法擅长度"加权的均值，而非简单平均/中位数。
+#   growth(成长): DCF/PEG 主导（高增长价值在现金流与增速），DDM 低（成长股分红少）
+#   steady(稳健): DCF/DDM/可比 均衡
+#   value(价值):  DDM/可比 主导（低增长高股息，现金流法与市场倍数更可靠），PEG 不适用
+#   cyclical(周期): PB 可比/历史分位/EVA 主导（PE 对周期盈利失真），PEG 不适用
+# 金融股（is_financial）：DCF/EVA 因 FCFF/IC 结构失真禁用，DDM/历史分位/PB 主导
+METHOD_WEIGHTS: dict[str, dict[str, float]] = {
+    "growth":   {"dcf": 0.30, "ddm": 0.05, "comps": 0.20, "peg": 0.25, "percentile": 0.10, "eva": 0.10},
+    "steady":   {"dcf": 0.30, "ddm": 0.25, "comps": 0.20, "peg": 0.05, "percentile": 0.10, "eva": 0.10},
+    "value":    {"dcf": 0.20, "ddm": 0.30, "comps": 0.25, "peg": 0.00, "percentile": 0.15, "eva": 0.10},
+    "cyclical": {"dcf": 0.25, "ddm": 0.10, "comps": 0.20, "peg": 0.00, "percentile": 0.25, "eva": 0.20},
+}
+
+# 金融股单独权重（DCF/EVA 结构失真禁用）
+FINANCIAL_WEIGHTS: dict[str, float] = {
+    "dcf": 0.0, "ddm": 0.45, "comps": 0.25, "peg": 0.0, "percentile": 0.30, "eva": 0.0,
+}
+
+# 方法中文名（用于权重展示）
+METHOD_WEIGHT_LABELS: dict[str, str] = {
+    "dcf": "DCF现金流折现",
+    "ddm": "DDM股利贴现",
+    "comps": "可比公司",
+    "peg": "PEG增速匹配",
+    "percentile": "历史估值分位",
+    "eva": "EVA经济增加值",
+}
+
+
+def method_weights(style: str, cd: CompanyData) -> dict[str, float]:
+    """返回综合研判用的方法权重（已按金融股/实际风格解析）。"""
+    if is_financial(cd):
+        return dict(FINANCIAL_WEIGHTS)
+    if style == "auto":
+        s = auto_detect_style(cd)
+    else:
+        s = style if style in METHOD_WEIGHTS else "steady"
+    return dict(METHOD_WEIGHTS.get(s, METHOD_WEIGHTS["steady"]))

@@ -88,6 +88,29 @@ def build_prompt(cd, results: dict[str, Any], extra: dict | None = None) -> str:
             lines.append(f"EV/EBITDA法: {_fmt_currency(comps.per_share_ev_ebitda)}({_pct(comps.upside_ev_ebitda)})")
         lines.append("")
 
+    peg = results.get("peg")
+    if peg and not getattr(peg, "error", "") and getattr(peg, "per_share_value", None):
+        lines.append("【PEG 增速匹配】")
+        lines.append(f"每股内在价值: {peg.per_share_value:,.2f}  相对现价: {_pct(peg.upside)}  结论: {peg.conclusion}")
+        lines.append(f"盈利增速: {_pct(peg.growth)}  目标PE: {peg.target_pe:.1f}  当前PEG: {peg.peg_now:.2f}" if __import__("math").isfinite(peg.peg_now) else
+                     f"盈利增速: {_pct(peg.growth)}  目标PE: {peg.target_pe:.1f}")
+        lines.append("")
+
+    percentile = results.get("percentile")
+    if percentile and not getattr(percentile, "error", "") and getattr(percentile, "per_share_value", None):
+        lines.append("【历史估值分位】")
+        lines.append(f"目标每股价值: {percentile.per_share_value:,.2f}  相对现价: {_pct(percentile.upside)}  结论: {percentile.conclusion}")
+        lines.append(f"PE历史分位: {_pct(percentile.pe_percentile)}  PB历史分位: {_pct(percentile.pb_percentile)}"
+                     f"（近{percentile.history_days}个交易日样本）")
+        lines.append("")
+
+    eva = results.get("eva")
+    if eva and not getattr(eva, "error", "") and getattr(eva, "per_share_value", None):
+        lines.append("【EVA 经济增加值】")
+        lines.append(f"每股内在价值: {eva.per_share_value:,.2f}  相对现价: {_pct(eva.upside)}  结论: {eva.conclusion}")
+        lines.append(f"ROIC: {_pct(eva.roic)}  WACC: {eva.wacc:.2%}  当年EVA: {_fmt_currency(eva.eva_now)}")
+        lines.append("")
+
     if extra:
         lines.append("【补充说明】")
         lines.append(extra.get("notes", ""))
@@ -117,21 +140,24 @@ def call_ai(prompt: str, provider: str, api_key: str, model: str | None = None,
     return resp.choices[0].message.content
 
 
-def rule_based_summary(cd, results: dict[str, Any]) -> str:
-    """无 API Key 时的本地规则引擎综合结论。"""
+def rule_based_summary(cd, results: dict[str, Any], style: str = "auto") -> str:
+    """无 API Key 时的本地规则引擎综合结论。按风格给各方法加权。"""
     lines = []
     lines.append(f"### {cd.name}（{cd.symbol}）综合研判（规则引擎版）")
     lines.append("")
     lines.append(f"- 当前股价 **{cd.latest_price():,.2f} {cd.currency}**，总市值 {_fmt_currency(cd.market_cap)}，PE(TTM) {cd.pe_ttm:.1f}，PB {cd.pb:.2f}。")
     lines.append("")
 
-    rows = []
+    from src.style_presets import method_weights, METHOD_WEIGHT_LABELS
+    weights = method_weights(style, cd)
+
+    rows = []  # (方法key, 名称, 每股价值, upside, 结论)
     dcf = results.get("dcf")
     if dcf and not getattr(dcf, "error", "") and getattr(dcf, "per_share_value", None):
-        rows.append(("DCF", dcf.per_share_value, dcf.upside, dcf.conclusion))
+        rows.append(("dcf", "DCF", dcf.per_share_value, dcf.upside, dcf.conclusion))
     ddm = results.get("ddm")
     if ddm and not getattr(ddm, "error", "") and getattr(ddm, "per_share_value", None):
-        rows.append(("DDM", ddm.per_share_value, ddm.upside, ddm.conclusion))
+        rows.append(("ddm", "DDM", ddm.per_share_value, ddm.upside, ddm.conclusion))
     rev = results.get("reverse_dcf")
     comps = results.get("comps")
     if comps and not getattr(comps, "error", ""):
@@ -141,33 +167,53 @@ def rule_based_summary(cd, results: dict[str, Any]) -> str:
             avg = float(sum(vals) / len(vals))
             price = cd.latest_price()
             up = avg / price - 1 if price else None
-            rows.append(("可比公司(均值)", avg, up, comps.conclusion))
+            rows.append(("comps", "可比公司", avg, up, comps.conclusion))
+    peg = results.get("peg")
+    if peg and not getattr(peg, "error", "") and getattr(peg, "per_share_value", None):
+        rows.append(("peg", "PEG", peg.per_share_value, peg.upside, peg.conclusion))
+    percentile = results.get("percentile")
+    if percentile and not getattr(percentile, "error", "") and getattr(percentile, "per_share_value", None):
+        rows.append(("percentile", "历史分位", percentile.per_share_value, percentile.upside, percentile.conclusion))
+    eva = results.get("eva")
+    if eva and not getattr(eva, "error", "") and getattr(eva, "per_share_value", None):
+        rows.append(("eva", "EVA", eva.per_share_value, eva.upside, eva.conclusion))
 
     if rows:
         lines.append("| 方法 | 每股价值 | 相对现价 | 结论 |")
         lines.append("|---|---|---|---|")
-        for name, v, up, conc in rows:
+        for key, name, v, up, conc in rows:
             lines.append(f"| {name} | {v:,.2f} | {_pct(up)} | {conc} |")
         lines.append("")
 
-    # 汇总判断
-    valid = [r for r in rows if r[2] is not None]
+    # 加权综合结论（按风格权重；有效方法权重归一化）
+    valid = [r for r in rows if r[3] is not None]
     if valid:
-        upsides = [r[2] for r in valid]
-        avg_up = sum(upsides) / len(upsides)
-        if avg_up >= 0.15:
-            verdict = f"多数方法显示**低估**（平均潜在上行 {_pct(avg_up)}），具备一定的安全边际。"
-        elif avg_up <= -0.15:
-            verdict = f"多数方法显示**高估**（平均潜在下行 {-avg_up:.1%}），当前价格可能透支了预期。"
+        w_sum = sum(weights.get(r[0], 0.0) for r in valid)
+        if w_sum > 0:
+            w_upside = sum(r[3] * weights.get(r[0], 0.0) for r in valid) / w_sum
         else:
-            verdict = f"各方法估值中枢与当前价接近（平均偏差 {_pct(abs(avg_up))}），估值**基本合理**。"
+            w_upside = sum(r[3] for r in valid) / len(valid)
+        if w_upside >= 0.15:
+            verdict = f"加权综合**低估**（风格加权潜在上行 {_pct(w_upside)}），具备一定的安全边际。"
+        elif w_upside <= -0.15:
+            verdict = f"加权综合**高估**（风格加权潜在下行 {-w_upside:.1%}），当前价格可能透支了预期。"
+        else:
+            verdict = f"加权综合估值中枢与当前价接近（加权偏差 {_pct(abs(w_upside))}），**基本合理**。"
         lines.append(f"**综合结论**：{verdict}")
         lines.append("")
 
+    # 权重说明（方法可信度）
+    if rows:
+        used = [(weights.get(r[0], 0.0), METHOD_WEIGHT_LABELS.get(r[0], r[0])) for r in rows]
+        used = [(w, n) for w, n in used if w > 0]
+        if used:
+            lines.append(f"*权重口径：综合结论按公司属性加权（有效方法权重归一化）——{ '、'.join(f'{n} {w:.0%}' for w, n in used) }。*")
+            lines.append("")
+
     # 一致性检查
     if len(valid) >= 2:
-        maxd = max(r[2] for r in valid)
-        mind = min(r[2] for r in valid)
+        maxd = max(r[3] for r in valid)
+        mind = min(r[3] for r in valid)
         if maxd - mind > 0.5:
             lines.append("⚠️ **方法间分歧较大**：不同估值方法给出的潜在空间差异超过 50%，"
                          "说明结论对假设高度敏感，建议重点复核增长率与折现率假设。")

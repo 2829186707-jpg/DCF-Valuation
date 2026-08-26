@@ -20,6 +20,10 @@ from src.models.dcf import DCFAssumptions, auto_assumptions, run_dcf
 from src.models.ddm import run_ddm
 from src.models.reverse_dcf import run_reverse_dcf
 from src.models.comps import run_comps, auto_peers
+from src.models.peg import run_peg
+from src.models.percentile import run_percentile
+from src.models.eva import run_eva
+from src.style_presets import method_weights, METHOD_WEIGHT_LABELS
 from src.methodology import METHODOLOGY
 from src.ai_advisor import PROVIDERS, build_prompt, call_ai, rule_based_summary
 
@@ -283,6 +287,22 @@ if "cd" in st.session_state:
             if _peer_pre and _peer_pre[0]:
                 _pre_comps = run_comps(cd, [p["symbol"] for p in _peer_pre[0]])
                 results = {**results, "comps": _pre_comps}
+            # PEG / 历史估值分位 / EVA（新方法）
+            try:
+                _pre_peg = run_peg(cd, style=style)
+                results = {**results, "peg": _pre_peg}
+            except Exception:
+                pass
+            try:
+                _pre_perc = run_percentile(cd)
+                results = {**results, "percentile": _pre_perc}
+            except Exception:
+                pass
+            try:
+                _pre_eva = run_eva(cd, style=style)
+                results = {**results, "eva": _pre_eva}
+            except Exception:
+                pass
         except Exception:
             # 预计算失败不阻塞主流程（Tab 内仍会按需重算）
             pass
@@ -736,7 +756,7 @@ if "cd" in st.session_state:
                 _v = apply_calib(_v, "dcf", _calib)
                 _up = _v / cd.latest_price() - 1 if cd.latest_price() and cd.latest_price() > 0 else np.nan
             rows.append(["DCF 现金流折现" + ("（已校准）" if _calib_enabled and _calib.get("has_data") else ""),
-                         _v, _up, dcf_r.conclusion])
+                         _v, _up, dcf_r.conclusion, "dcf"])
         ddm_r = results.get("ddm")
         if ddm_r and not getattr(ddm_r, "error", "") and getattr(ddm_r, "per_share_value", None) and math.isfinite(ddm_r.per_share_value):
             _v = ddm_r.per_share_value
@@ -745,7 +765,7 @@ if "cd" in st.session_state:
                 _v = apply_calib(_v, "ddm", _calib)
                 _up = _v / cd.latest_price() - 1 if cd.latest_price() and cd.latest_price() > 0 else np.nan
             rows.append(["DDM 股利贴现" + ("（已校准）" if _calib_enabled and _calib.get("has_data") else ""),
-                         _v, _up, ddm_r.conclusion])
+                         _v, _up, ddm_r.conclusion, "ddm"])
         rev_r = results.get("reverse_dcf")
         comps_r = results.get("comps")
         if comps_r and not getattr(comps_r, "error", ""):
@@ -757,11 +777,20 @@ if "cd" in st.session_state:
                 avg = float(sum(vals) / len(vals))
                 price = cd.latest_price()
                 up = avg / price - 1 if price and price > 0 else np.nan
-                rows.append(["可比公司(均值)", avg, up, comps_r.conclusion])
+                rows.append(["可比公司(均值)", avg, up, comps_r.conclusion, "comps"])
+        peg_r = results.get("peg")
+        if peg_r and not getattr(peg_r, "error", "") and getattr(peg_r, "per_share_value", None) and math.isfinite(peg_r.per_share_value):
+            rows.append(["PEG 增速匹配", peg_r.per_share_value, peg_r.upside, peg_r.conclusion, "peg"])
+        perc_r = results.get("percentile")
+        if perc_r and not getattr(perc_r, "error", "") and getattr(perc_r, "per_share_value", None) and math.isfinite(perc_r.per_share_value):
+            rows.append(["历史估值分位", perc_r.per_share_value, perc_r.upside, perc_r.conclusion, "percentile"])
+        eva_r = results.get("eva")
+        if eva_r and not getattr(eva_r, "error", "") and getattr(eva_r, "per_share_value", None) and math.isfinite(eva_r.per_share_value):
+            rows.append(["EVA 经济增加值", eva_r.per_share_value, eva_r.upside, eva_r.conclusion, "eva"])
 
         if rows:
             st.markdown("### 方法对比")
-            comp = pd.DataFrame(rows, columns=["方法", "每股价值", "相对现价", "结论"])
+            comp = pd.DataFrame([r[:4] for r in rows], columns=["方法", "每股价值", "相对现价", "结论"])
             disp = comp.copy()
             disp["每股价值"] = disp["每股价值"].map(lambda x: f"{x:,.2f}")
             disp["相对现价"] = disp["相对现价"].map(lambda x: f"{x:+.1%}")
@@ -772,11 +801,20 @@ if "cd" in st.session_state:
                             marker_color=["steelblue", "seagreen", "orange", "purple"][:len(comp)])
             price_now = cd.latest_price()
 
-            # 推荐合理估值 = 各方法中位数（稳健，不受极端值干扰）
-            _vals = [float(v) for v in comp["每股价值"].tolist() if isinstance(v, (int, float)) and math.isfinite(v)]
-            if _vals:
-                median_v = float(np.median(_vals))
-                lo_v, hi_v = min(_vals), max(_vals)
+            # ========== 推荐合理估值 = 风格×方法 加权平均 ==========
+            # 不同公司类型下各方法可信度不同：成长股重 DCF/PEG、价值股重 DDM/可比、
+            # 周期股重历史分位/PB、金融股禁用 DCF/EVA。有效方法权重归一化后加权。
+            _mweights = method_weights(style, cd)
+            _weighted = []
+            for _r_ in rows:
+                _v_, _key_ = _r_[1], _r_[4]
+                _w_ = _mweights.get(_key_, 0.0)
+                if isinstance(_v_, (int, float)) and math.isfinite(_v_) and _w_ > 0:
+                    _weighted.append((_v_, _w_))
+            if _weighted:
+                _ws = sum(w for _, w in _weighted)
+                median_v = sum(v * w for v, w in _weighted) / _ws if _ws > 0 else np.nan
+                lo_v, hi_v = min(v for v, _ in _weighted), max(v for v, _ in _weighted)
             else:
                 median_v = lo_v = hi_v = np.nan
 
@@ -802,10 +840,19 @@ if "cd" in st.session_state:
                     rec_concl, rec_txt = "高估", "推荐合理估值低于当前价，当前价格透支较多预期，需谨慎。"
 
                 rc1, rc2, rc3 = st.columns(3)
-                rc1.metric("推荐合理估值（中位数）", f"{median_v:.2f} {cd.currency}",
+                rc1.metric("推荐合理估值（加权综合）", f"{median_v:.2f} {cd.currency}",
                            f"{up:+.1%} vs 现价")
                 rc2.metric("合理区间", f"{lo_v:.2f} ~ {hi_v:.2f} {cd.currency}")
                 rc3.metric("综合结论", rec_concl)
+
+                # 权重口径说明
+                _used_w = [(w, n) for w, n in
+                           ((_mweights.get(r[4], 0.0), METHOD_WEIGHT_LABELS.get(r[4], r[4])) for r in rows)
+                           if w > 0]
+                if _used_w:
+                    st.caption("**权重口径**：按公司属性加权（有效方法归一化）——"
+                               + "、".join(f"{n} {w:.0%}" for w, n in _used_w)
+                               + "。成长股重 DCF/PEG、价值股重 DDM/可比、周期股重历史分位、金融股禁 DCF/EVA。")
 
                 shares = cd.shares
                 if not math.isfinite(shares) or shares <= 0:
@@ -856,7 +903,7 @@ if "cd" in st.session_state:
             except Exception as e:
                 st.error(f"AI 调用失败：{e}\n请检查 API Key、服务商与模型名是否正确。")
         else:
-            st.markdown(rule_based_summary(cd, results))
+            st.markdown(rule_based_summary(cd, results, style=style))
             if not api_key:
                 st.caption("提示：在上方配置 API Key 后可生成更深入的 AI 综合研判。")
 
