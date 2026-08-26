@@ -34,12 +34,14 @@ st.set_page_config(
 # ============ 工具函数（放在顶部，供各 Tab 使用） ============
 
 class DCFAssumptionsSafe:
-    """用于敏感性分析的轻量假设容器（复用 DCFAssumptions 字段）。"""
+    """用于敏感性分析的轻量假设容器（复用 DCFAssumptions 字段）。
+
+    动态复制全部字段：后续 DCFAssumptions 新增字段（base_rev/capex_normalize 等）
+    自动跟随，避免硬编码字段清单遗漏导致 AttributeError。
+    """
     def __init__(self, a):
-        for f in ["forecast_years", "revenue_growth", "growth_decline", "accel", "terminal_growth",
-                  "operating_margin", "tax_rate", "capex_pct", "da_pct", "nwc_pct",
-                  "beta", "debt_rate", "erp", "rf"]:
-            setattr(self, f, getattr(a, f))
+        for f, v in vars(a).items():
+            setattr(self, f, v)
 
 
 def _dcf_with_wacc(cd, assump, wacc: float) -> float:
