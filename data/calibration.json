@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "updated": "2026-08-26T09:06:01.856329",
+  "styles": {
+    "A:growth": {
+      "style": "growth",
+      "market": "A",
+      "factor": 1.4,
+      "ddm_factor": 1.4,
+      "samples": 37,
+      "hit_rate": 0.4,
+      "mean_error": -0.5449057559887676
+    },
+    "A:steady": {
+      "style": "steady",
+      "market": "A",
+      "factor": 1.153770870921572,
+      "ddm_factor": 1.153770870921572,
+      "samples": 23,
+      "hit_rate": 0.6,
+      "mean_error": -0.17573813819608197
+    }
+  }
+}

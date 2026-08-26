@@ -498,14 +498,61 @@ if "cd" in st.session_state:
     with tab_summary:
         st.markdown("## 综合研判")
         results = st.session_state.get("results", {})
-        # 方法对比表
+
+        # ========== 模型校准状态区（历史回测自主学习） ==========
+        try:
+            from src.calibration.app_utils import calib_context, apply_calib
+            _calib = calib_context(_actual, cd.market)
+            calib_enabled = st.session_state.get("calib_enabled", True)
+        except Exception:
+            _calib = {"has_data": False}
+            calib_enabled = False
+
+        with st.expander("🧠 模型校准状态（基于历史回测的自主学习）", expanded=_calib["has_data"]):
+            if _calib["has_data"]:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("校准系数（DCF）", f"{_calib['factor']:.3f}",
+                          "内在价值 × 系数")
+                c2.metric("校准系数（DDM）", f"{_calib['ddm_factor']:.3f}")
+                c3.metric("回测样本数", f"{_calib['samples']}")
+                hr = _calib.get("hit_rate")
+                c4.metric("方向命中率", f"{hr:.0%}" if isinstance(hr, (int, float)) and np.isfinite(hr) else "N/A")
+                me = _calib.get("mean_error")
+                st.caption(
+                    f"历史均值误差 **{me:+.1%}**（>0 表示模型系统性高估 → 系数<1 下调；<0 表示系统性低估 → 系数>1 上调）。"
+                    f"校准表更新于 **{_calib.get('updated', '未知')[:10]}**。"
+                    f"当前股票判定风格 **{_actual}**，匹配层 {_calib['key']}。")
+                st.toggle("启用历史校准（对 DCF/DDM 内在价值应用系数）",
+                          value=calib_enabled, key="calib_enabled")
+                if not calib_enabled:
+                    st.info("校准已关闭，下方估值将使用未校准的原始值。")
+            else:
+                st.info("本风格/市场暂无可用的校准数据。校准系统会随历史回测样本积累自动生效"
+                        "（每个 风格×市场 分层至少 3 个有效样本）。")
+                st.caption("说明：校准系统在历史时点用当时可得数据重跑估值模型，对比之后 1 年实际表现，"
+                           "按 风格×市场 分层统计偏差生成系数，用于修正系统性高估/低估。")
+            _calib_enabled = st.session_state.get("calib_enabled", True)
+
+        # 方法对比表（应用校准系数）
         rows = []
         dcf_r = results.get("dcf")
         if dcf_r and not getattr(dcf_r, "error", "") and getattr(dcf_r, "per_share_value", None) and math.isfinite(dcf_r.per_share_value):
-            rows.append(["DCF 现金流折现", dcf_r.per_share_value, dcf_r.upside, dcf_r.conclusion])
+            _v = dcf_r.per_share_value
+            _up = dcf_r.upside
+            if _calib_enabled and _calib.get("has_data"):
+                _v = apply_calib(_v, "dcf", _calib)
+                _up = _v / cd.latest_price() - 1 if cd.latest_price() and cd.latest_price() > 0 else np.nan
+            rows.append(["DCF 现金流折现" + ("（已校准）" if _calib_enabled and _calib.get("has_data") else ""),
+                         _v, _up, dcf_r.conclusion])
         ddm_r = results.get("ddm")
         if ddm_r and not getattr(ddm_r, "error", "") and getattr(ddm_r, "per_share_value", None) and math.isfinite(ddm_r.per_share_value):
-            rows.append(["DDM 股利贴现", ddm_r.per_share_value, ddm_r.upside, ddm_r.conclusion])
+            _v = ddm_r.per_share_value
+            _up = ddm_r.upside
+            if _calib_enabled and _calib.get("has_data"):
+                _v = apply_calib(_v, "ddm", _calib)
+                _up = _v / cd.latest_price() - 1 if cd.latest_price() and cd.latest_price() > 0 else np.nan
+            rows.append(["DDM 股利贴现" + ("（已校准）" if _calib_enabled and _calib.get("has_data") else ""),
+                         _v, _up, ddm_r.conclusion])
         rev_r = results.get("reverse_dcf")
         comps_r = results.get("comps")
         if comps_r and not getattr(comps_r, "error", ""):
@@ -573,11 +620,12 @@ if "cd" in st.session_state:
                 if math.isfinite(shares) and shares > 0:
                     rec_mcap, lo_mcap, hi_mcap = median_v * shares, lo_v * shares, hi_v * shares
                     cur_mcap = cd.market_cap
+                    _calib_note = "（已按历史校准调整）" if _calib_enabled and _calib.get("has_data") else ""
                     if math.isfinite(cur_mcap) and cur_mcap > 0:
-                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**（区间 {fmt_big(lo_mcap)} ~ "
+                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**{_calib_note}（区间 {fmt_big(lo_mcap)} ~ "
                                     f"{fmt_big(hi_mcap)}），当前市值 {fmt_big(cur_mcap)}。{rec_txt}")
                     else:
-                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**。{rec_txt}")
+                        st.markdown(f"**对应合理市值**：约 **{fmt_big(rec_mcap)}**{_calib_note}。{rec_txt}")
                 else:
                     st.markdown(f"**解读**：{rec_txt}")
 
