@@ -7,16 +7,49 @@ from __future__ import annotations
 
 
 def _build_a_pool(min_mcap_cny: float = 500e8, limit: int = 200) -> list[str]:
-    """A股：东财实时行情（含总市值），筛选市值≥min_mcap 元。"""
-    import akshare as ak
-    df = ak.stock_zh_a_spot_em()
-    df["总市值"] = df["总市值"].astype(float)
-    hit = df[df["总市值"] >= min_mcap_cny]
-    hit = hit.sort_values("总市值", ascending=False)
-    # 排除非A股（如北交所代码规则），取 6 位代码
-    codes = [str(c).zfill(6) for c in hit["代码"].tolist()]
-    # 排除北交所（8开头/4开头）以保持财务数据源一致（新浪接口）
-    codes = [c for c in codes if not c.startswith(("4", "8"))]
+    """A股：新浪实时行情（含总市值，mktcap 单位万元），筛选市值≥min_mcap 元。
+
+    说明：akshare 的东财 stock_zh_a_spot_em 默认 UA 被风控拒绝，改走新浪
+    Market_Center.getHQNodeData（带浏览器 UA 实测可用），按总市值降序分页拉取。
+    """
+    import requests
+
+    url = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://finance.sina.com.cn/",
+    }
+    codes: list[str] = []
+    page = 1
+    while len(codes) < limit and page <= 200:
+        params = {
+            "page": str(page), "num": "100", "sort": "mktcap", "asc": "0",
+            "node": "hs_a", "symbol": "", "_s_r_a": "page",
+        }
+        r = requests.get(url, params=params, headers=headers, timeout=25)
+        r.raise_for_status()
+        arr = r.json()
+        if not isinstance(arr, list) or not arr:
+            break
+        for it in arr:
+            try:
+                mktcap_yuan = float(it.get("mktcap", 0)) * 1e4  # 万元 -> 元
+            except (TypeError, ValueError):
+                continue
+            # 按市值降序分页：一旦低于门槛，后续页都更小，提前结束
+            if mktcap_yuan < min_mcap_cny:
+                return codes[:limit]
+            code = str(it.get("code", "")).zfill(6)
+            # 排除北交所（4/8/920 开头），保持财务数据源一致（新浪接口）
+            if code.startswith(("4", "8", "920")):
+                continue
+            codes.append(code)
+            if len(codes) >= limit:
+                return codes[:limit]
+        page += 1
     return codes[:limit]
 
 
