@@ -28,7 +28,8 @@ class StyleCalib:
     market: str
     factor: float = 1.0        # 校准系数（DCF 内在价值 × factor）
     ddm_factor: float = 1.0
-    samples: int = 0
+    samples: int = 0           # 该层原始样本数（含失真过滤掉的）
+    valid_samples: int = 0     # 失真过滤后实际用于校准的样本数
     hit_rate: float = np.nan   # 方向命中率（隐含预期与超额的符号一致率）
     mean_error: float = np.nan
     note: str = ""
@@ -47,17 +48,19 @@ def _shrink_factor(mean_err: float, n: int, min_n: int = 8) -> float:
 def _valid_sample(s, method: str) -> tuple[bool, float, float, float]:
     """质量门槛：判断回测样本对该估值方法是否有效。
     返回 (是否有效, 误差, 隐含收益, 该方法的每股价值)。
-    排除：
+
+    排除（仅失真类）：
       - 该方法报错 / 值为 nan
-      - 隐含预期收益 |implied| > 3.0（>300%，结构性失真，多为金融/地产 FCFF 失真）
-      - DCF 与 DDM 分歧 > 2 倍（两种方法打架，各自失真）
+      - DCF 与 DDM 分歧 > 2 倍（两种方法打架，各自失真，金融/地产 FCFF 失真常见于此）
+
+    注：不再用 |implied|>3 一刀切剔除——高隐含样本（模型隐含暴涨但实际未兑现）
+    往往是「模型高估」的真实信号，剔除会制造"低估"假象。极端值统一由
+    Winsorize（聚合时截尾 p5/p95）处理，保留方向信息。
     """
     implied = getattr(s, f"implied_{method}", np.nan)
     err = getattr(s, f"error_{method}_1y", np.nan)
     val = getattr(s, f"intrinsic_{method}", np.nan)
     if not np.isfinite(implied) or not np.isfinite(err) or not np.isfinite(val):
-        return False, np.nan, np.nan, np.nan
-    if abs(implied) > 3.0:
         return False, np.nan, np.nan, np.nan
     # 方法分歧（两种方法都有效时才比较）
     other = getattr(s, f"intrinsic_{'ddm' if method == 'dcf' else 'dcf'}", np.nan)
@@ -66,6 +69,17 @@ def _valid_sample(s, method: str) -> tuple[bool, float, float, float]:
         if ratio > 2.0 or ratio < 0.5:
             return False, np.nan, np.nan, np.nan
     return True, err, implied, val
+
+
+def _winsorize(errs: list[float] | np.ndarray, lower: float = 0.05,
+               upper: float = 0.95) -> np.ndarray:
+    """Winsorize 截尾：把极端误差压到 p5/p95，保留方向信息但防荒谬值主导。"""
+    a = np.asarray(errs, dtype=float)
+    a = a[np.isfinite(a)]
+    if len(a) < 10:  # 小样本不截尾，避免过度压缩
+        return a
+    lo, hi = np.percentile(a, lower * 100), np.percentile(a, upper * 100)
+    return np.clip(a, lo, hi)
 
 
 def compute_calibration(samples: list, method: str = "dcf",
@@ -105,32 +119,31 @@ def compute_calibration(samples: list, method: str = "dcf",
         if len(valid) < 3:
             continue
         errs = [v[1] for v in valid]
-        ws = [float(np.exp(-time_decay * (ref_year - int(s.year))))
-              for s, v in zip(group, valid) if v[0]]
-        # valid 顺序与 group 对应，重建 ws
         ws = []
         for s in group:
             vv = _valid_sample(s, method)
             if vv[0]:
                 ws.append(float(np.exp(-time_decay * (ref_year - int(s.year)))))
-        mean_err = _weighted_median_approx(errs, ws)
+        # Winsorize 抗极端：保留高隐含样本的方向信号，但压住荒谬值
+        errs_w = _winsorize(errs)
+        mean_err = _weighted_median_approx(errs_w.tolist(), ws)
         # 方向命中率：隐含预期与实际超额同号的比例
         hit = 0
         total = 0
         for s in group:
             implied = getattr(s, f"implied_{method}", np.nan)
             exc = s.excess_1y
-            if np.isfinite(implied) and np.isfinite(exc) and abs(exc) > 0.02 and abs(implied) <= 3.0:
+            if np.isfinite(implied) and np.isfinite(exc) and abs(exc) > 0.02:
                 total += 1
                 if (implied > 0) == (exc > 0):
                     hit += 1
         hit_rate = hit / total if total else np.nan
         factor = _shrink_factor(mean_err, len(errs))
+        ddm_err_w = _winsorize([v[1] for v in valid if np.isfinite(v[1])])
         calib[f"{market}:{style}"] = StyleCalib(
             style=style, market=market, factor=factor,
-            ddm_factor=_shrink_factor(float(np.median(
-                [v[1] for v in valid if np.isfinite(v[1])])), len(errs)),
-            samples=len(group), hit_rate=hit_rate, mean_error=mean_err,
+            ddm_factor=_shrink_factor(float(np.median(ddm_err_w)), len(errs)),
+            samples=len(group), valid_samples=len(errs), hit_rate=hit_rate, mean_error=mean_err,
         )
     return calib
 
@@ -147,6 +160,7 @@ def save_calibration(calib: dict[str, StyleCalib], path: str | None = None,
         "styles": {
             k: {"style": v.style, "market": v.market, "factor": v.factor,
                 "ddm_factor": v.ddm_factor, "samples": v.samples,
+                "valid_samples": v.valid_samples,
                 "hit_rate": v.hit_rate if np.isfinite(v.hit_rate) else None,
                 "mean_error": v.mean_error}
             for k, v in calib.items()

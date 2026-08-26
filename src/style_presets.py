@@ -112,28 +112,58 @@ def _hist_cagr(cd: CompanyData, years: int = 5) -> float:
     return np.nan
 
 
+def _detect_cyclical(cd: CompanyData, ann) -> bool:
+    """周期股检测：盈利/营收大幅波动。
+
+    先于成长判断执行——周期股即使某几年高增长（如周期底部反弹），
+    也应归入 cyclical 用正常化盈利估值，避免混入 growth 层造成 DCF 隐含收益荒谬放大。
+    信号（近 8 年窗口，任一命中即判周期）：
+      ① 营业利润率变异系数 > 0.5
+      ② 营收变异系数 > 0.6
+      ③ 净利率变异系数 > 0.7
+      ④ 净利峰谷比（近8年全为正时最大/最小 > 6 倍）
+    """
+    if ann is None or len(ann) < 4:
+        return False
+    # ① 营业利润率变异系数（主信号）
+    margin = (ann["operating_income"] / ann["revenue"]).dropna().tail(8)
+    if len(margin) >= 4 and margin.mean() > 0:
+        if float(margin.std() / abs(margin.mean())) > 0.5:
+            return True
+    # ② 营收变异系数
+    rev = ann["revenue"].dropna().tail(8)
+    if len(rev) >= 4 and rev.mean() > 0:
+        if float(rev.std() / rev.mean()) > 0.6:
+            return True
+    # ③ 净利率变异系数
+    if "net_income" in ann.columns:
+        ni_margin = (ann["net_income"] / ann["revenue"]).dropna().tail(8)
+        if len(ni_margin) >= 4 and ni_margin.mean() > 0:
+            if float(ni_margin.std() / abs(ni_margin.mean())) > 0.7:
+                return True
+    # ④ 净利峰谷比（近8年全为正时跨度>6倍）
+    if "net_income" in ann.columns:
+        ni = ann["net_income"].dropna().tail(8)
+        if len(ni) >= 4 and (ni > 0).sum() >= 4:
+            mx, mn = float(ni.max()), float(ni.min())
+            if mn > 0 and mx / mn > 6.0:
+                return True
+    return False
+
+
 def auto_detect_style(cd: CompanyData) -> str:
-    """自动识别公司属性。"""
+    """自动识别公司属性（周期性优先，避免周期股/重资产误入成长层）。"""
+    ann = cd.annual
+    # ① 周期特征优先：盈利/营收大幅波动（周期股即使高增长也按周期处理）
+    if _detect_cyclical(cd, ann):
+        return "cyclical"
+
+    # ② 成长：历史收入 CAGR > 15%（且盈利稳定，周期信号已在上方排除）
     g = _hist_cagr(cd, 5)
     if np.isfinite(g) and g > 0.15:
         return "growth"
 
-    # 周期特征：近8年营业利润率变异系数（利润率大幅波动=典型周期股）
-    # 辅助信号：营收变异系数 > 0.5（排除数据异常后仍显著波动）
-    ann = cd.annual
-    if ann is not None and len(ann) >= 4:
-        margin = (ann["operating_income"] / ann["revenue"]).dropna().tail(8)
-        if len(margin) >= 4 and margin.mean() > 0:
-            cv_m = float(margin.std() / abs(margin.mean()))
-            if cv_m > 0.5:
-                return "cyclical"
-        rev = ann["revenue"].dropna().tail(8)
-        if len(rev) >= 4 and rev.mean() > 0:
-            cv_r = float(rev.std() / rev.mean())
-            if cv_r > 0.5:
-                return "cyclical"
-
-    # 低增长 + 高股息 → 价值
+    # ③ 价值：低增长 + 高股息
     if np.isfinite(g) and g < 0.05:
         div = cd.last_value("dividends")
         mcap = cd.market_cap

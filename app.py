@@ -515,13 +515,15 @@ if "cd" in st.session_state:
                           "内在价值 × 系数")
                 c2.metric("校准系数（DDM）", f"{_calib['ddm_factor']:.3f}")
                 c3.metric("回测样本数", f"{_calib['samples']}")
+                vs = _calib.get("valid_samples", 0)
                 hr = _calib.get("hit_rate")
                 c4.metric("方向命中率", f"{hr:.0%}" if isinstance(hr, (int, float)) and np.isfinite(hr) else "N/A")
                 me = _calib.get("mean_error")
                 st.caption(
                     f"历史均值误差 **{me:+.1%}**（>0 表示模型系统性高估 → 系数<1 下调；<0 表示系统性低估 → 系数>1 上调）。"
                     f"校准表更新于 **{_calib.get('updated', '未知')[:10]}**。"
-                    f"当前股票判定风格 **{_actual}**，匹配层 {_calib['key']}。")
+                    f"当前股票判定风格 **{_actual}**，匹配层 {_calib['key']}"
+                    f"（原始样本 {_calib['samples']}，失真过滤后有效 **{vs}**）。")
                 st.toggle("启用历史校准（对 DCF/DDM 内在价值应用系数）",
                           value=calib_enabled, key="calib_enabled")
                 if not calib_enabled:

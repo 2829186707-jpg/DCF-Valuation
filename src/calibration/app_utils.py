@@ -19,6 +19,7 @@ def calib_context(style: str, market: str) -> dict:
         "factor": float(entry.get("factor", 1.0)) if entry else 1.0,
         "ddm_factor": float(entry.get("ddm_factor", 1.0)) if entry else 1.0,
         "samples": int(entry.get("samples", 0)) if entry else 0,
+        "valid_samples": int(entry.get("valid_samples", 0)) if entry else 0,
         "hit_rate": entry.get("hit_rate"),
         "mean_error": entry.get("mean_error"),
         "updated": calib.get("updated", "") if isinstance(calib, dict) else "",
